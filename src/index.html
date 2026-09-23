@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LyricTag · 本地曲库歌词匹配与嵌入工具</title>
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ═══════════ 标题栏（无边框窗口，自绘控制按钮） ═══════════ -->
+  <div class="titlebar" data-tauri-drag-region>
+    <div class="logo" data-tauri-drag-region>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+      </svg>
+    </div>
+    <div class="appname" data-tauri-drag-region>LyricTag<span>本地曲库歌词匹配与嵌入工具</span></div>
+    <div class="spacer" data-tauri-drag-region></div>
+    <div class="winbtns">
+      <button id="winMin" title="最小化"><svg viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor" stroke-width="1.2"/></svg></button>
+      <button id="winMax" title="最大化"><svg viewBox="0 0 10 10"><rect x=".6" y=".6" width="8.8" height="8.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></button>
+      <button class="close" id="winClose" title="关闭"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1.2"/></svg></button>
+    </div>
+  </div>
+
+  <!-- ═══════════ 主导航：只有两个页签 ═══════════ -->
+  <div class="navbar">
+    <button class="navtab on" data-view="library">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      曲库
+    </button>
+    <button class="navtab" data-view="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.2 2.2M16.9 16.9l2.2 2.2M19.1 4.9l-2.2 2.2M7.1 16.9l-2.2 2.2"/></svg>
+      设置
+    </button>
+    <div class="grow"></div>
+    <button class="theme-toggle" id="themeToggle" title="切换主题">
+      <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- ═══════════ 视图区 ═══════════ -->
+  <div class="views">
+
+    <!-- ─────────── 视图一：曲库 ─────────── -->
+    <div class="view on" id="view-library">
+      <div class="toolbar">
+        <button class="btn" id="btnScan">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+          选择文件夹
+        </button>
+        <div class="field" style="width:290px" id="scanPathField">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+          <input placeholder="还没有选择文件夹" spellcheck="false" id="scanPath" readonly>
+          <button class="pickbtn" id="btnRecent" title="最近使用的文件夹" aria-haspopup="true" aria-expanded="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <!-- 最近使用的目录：点右侧箭头展开，直接选一个开始读取 -->
+          <div class="recentmenu" id="recentMenu" hidden></div>
+        </div>
+        <button class="btn" id="btnRefresh" title="重新读取当前文件夹里的歌曲（列表会先清空）">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 11-2.5-6"/><path d="M21 3v6h-6"/></svg>
+          刷新
+        </button>
+        <div class="sep"></div>
+        <button class="btn primary" id="btnMatch">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          开始匹配
+        </button>
+        <button class="btn primary" id="btnWrite">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg>
+          保存歌词
+        </button>
+        <button class="btn danger" id="btnStop" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" stroke="none"/></svg>
+          停止
+        </button>
+        <div class="grow"></div>
+        <div class="field search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input placeholder="搜索歌曲…" id="searchBox" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="panes">
+        <!-- 左栏：智能视图 -->
+        <div class="pane left">
+          <div class="pane-head"><span>智能视图</span><div class="grow"></div></div>
+          <div class="pane-body">
+            <div class="treelist" id="smartViews"></div>
+          </div>
+        </div>
+
+        <!-- 中栏：表格（虚拟滚动） -->
+        <div class="pane">
+          <div class="tablewrap">
+            <div class="thead">
+              <div><span class="cbox" id="checkAll" title="全选"></span></div>
+              <div style="justify-content:center">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" title="歌词状态"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+              </div>
+              <div class="sortable" data-sort="title">标题 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg></div>
+              <div class="sortable" data-sort="artist">艺术家</div>
+              <div class="sortable" data-sort="duration">时长</div>
+              <div class="sortable" data-sort="state">状态</div>
+              <div title="这首歌的歌曲文件里 / 旁边已经有什么歌词——保存前先看清，免得重复保存">已有歌词</div>
+              <div class="sortable" data-sort="score">匹配到的歌词</div>
+            </div>
+            <div class="tbody" id="tbody"></div>
+
+            <!-- 空状态：还没有添加音乐 / 文件夹里没有音乐（§6.7） -->
+            <div class="emptystate" id="emptyState" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+              </svg>
+              <h3 id="emptyTitle">还没有添加音乐</h3>
+              <p id="emptyBody">选择你存放音乐的文件夹，LyricTag 会扫描其中的歌曲，为它们匹配歌词</p>
+              <button class="btn primary" id="emptyAction">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+                选择音乐文件夹
+              </button>
+            </div>
+
+            <!-- 全部处理完的提示（§6.7） -->
+            <div class="emptystate" id="alldoneState" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 6L9 17l-5-5"/>
+              </svg>
+              <h3 id="alldoneTitle">全部处理好了 🎉</h3>
+              <p>这个筛选条件下已经没有待处理的歌曲</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 右栏：详情 -->
+        <div class="pane right">
+          <div class="pane-head"><span>曲目详情</span><div class="grow"></div>
+            <button id="btnManual" title="手动搜索">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5M11 8v6M8 11h6"/></svg>
+            </button>
+          </div>
+          <div class="detail" id="detail">
+            <div class="detailscroll" id="detailScroll">
+              <div class="empty">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                <p>从左侧列表选择一首歌曲<br>查看歌曲信息、候选歌词与歌词预览</p>
+              </div>
+            </div>
+            <div class="detailactions" id="detailActions"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 批量操作条 -->
+      <div class="bulkbar" id="bulkbar">
+        <span class="cnt">已选 <b id="selCount">0</b> 首</span>
+        <div class="sepv"></div>
+        <button class="btn sm" id="bulkMatch">匹配歌词</button>
+        <button class="btn sm primary" id="bulkWrite">保存歌词</button>
+        <button class="btn sm ghost" id="bulkClear">取消选择</button>
+      </div>
+    </div>
+
+    <!-- ─────────── 视图二：设置（唯一一页，7 项） ─────────── -->
+    <div class="view" id="view-settings">
+      <div class="setpage">
+        <div class="setwrap">
+          <h2>设置</h2>
+
+          <div class="setgrp">
+            <h4>外观</h4>
+            <div class="setrow">
+              <div class="lab">
+                <div class="n">主题</div>
+              </div>
+              <div class="ctl">
+                <select class="inp" id="setTheme" style="width:120px">
+                  <option value="system">跟随系统</option>
+                  <option value="light">浅色</option>
+                  <option value="dark">深色</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="setgrp">
+            <h4>歌词</h4>
+            <div class="setrow">
+              <div class="lab">
+                <div class="n">歌词保存方式</div>
+                <div class="d" id="targetHint">歌词会保存进歌曲里，换播放器、换电脑都跟着走</div>
+              </div>
+            </div>
+            <div class="setrow" style="padding-top:0;border-top:none">
+              <div class="seg" id="segTarget" style="width:100%">
+                <button class="segi on" data-v="file">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                  写入歌曲文件
+                  <small>换播放器也不丢</small>
+                </button>
+                <button class="segi" data-v="sidecar">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M14 3v6h6"/></svg>
+                  另存为 .lrc 文件
+                  <small>不改动原文件</small>
+                </button>
+              </div>
+            </div>
+            <div class="setrow">
+              <div class="lab">
+                <div class="n">包含翻译歌词</div>
+                <div class="d">歌曲有官方翻译时，一并保存下来</div>
+              </div>
+              <div class="ctl"><span class="sw on" data-key="include_translation"></span></div>
+            </div>
+            <div class="setrow">
+              <div class="lab">
+                <div class="n">歌曲已有歌词时覆盖</div>
+                <div class="d">关闭时，已经带有歌词的歌曲会被跳过</div>
+              </div>
+              <div class="ctl"><span class="sw" data-key="overwrite_existing"></span></div>
+            </div>
+          </div>
+
+          <div class="setgrp">
+            <h4>歌曲信息</h4>
+            <div class="setrow">
+              <div class="lab">
+                <div class="n">补全歌曲缺少的信息</div>
+                <div class="d">如标题、艺术家、专辑、年份等；歌曲已有的内容不会被改动</div>
+              </div>
+              <div class="ctl"><span class="sw on" data-key="fill_missing_info"></span></div>
+            </div>
+            <div class="setrow">
+              <div class="lab">
+                <div class="n">保存专辑封面到歌曲文件</div>
+                <div class="d">会从网络下载封面图片，每首歌大约增加 0.1–1 MB</div>
+              </div>
+              <div class="ctl"><span class="sw" data-key="embed_cover"></span></div>
+            </div>
+          </div>
+
+          <div class="setgrp">
+            <h4>存储</h4>
+            <div class="setrow">
+              <div class="lab">
+                <div class="n">清空歌词缓存</div>
+                <div class="d">已处理过的歌曲不受影响，只是下次需要重新从网络获取</div>
+              </div>
+              <div class="ctl" style="gap:10px">
+                <span style="font-size:12px;color:var(--text-3)" id="cacheUsage">已用 —</span>
+                <button class="btn sm" id="btnClearCache">清空</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ═══════════ 状态栏 ═══════════ -->
+  <div class="statusbar">
+    <div class="phase" id="stPhase">
+      <span style="width:12px;height:12px;border-radius:50%;background:var(--st-idle);flex:0 0 auto" id="stDot"></span>
+      <span id="stPhaseText">就绪</span>
+    </div>
+    <div class="pbar"><i id="stBar" style="width:0%"></i></div>
+    <span class="num" style="color:var(--text-2);font-size:11.5px" id="stProgress"></span>
+    <div class="sep"></div>
+    <span class="stat ok">已写入 <b id="stOk">0</b></span>
+    <span class="stat wn">待确认 <b id="stWarn">0</b></span>
+    <span class="stat er">未找到 <b id="stErr">0</b></span>
+    <div class="grow"></div>
+    <span class="ratelimit" id="stRate"></span>
+    <button class="mini" id="btnLog">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:12px;height:12px"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      查看日志
+    </button>
+  </div>
+
+  <!-- ═══════════ 日志抽屉 ═══════════ -->
+  <div class="logdrawer" id="logDrawer">
+    <div class="loginner" id="logInner"></div>
+  </div>
+</div>
+
+<!-- ═══════════ 保存确认弹窗（流程 D） ═══════════ -->
+<div class="scrim" id="scrimPlan">
+  <div class="modal wide">
+    <div class="modal-h">
+      <div class="ic" style="background:var(--accent-soft);color:var(--accent)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg>
+      </div>
+      <h3>保存歌词</h3>
+      <button data-close><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1.3"/></svg></button>
+    </div>
+    <div class="modal-b">
+      <div class="summary">
+        <div><div class="k">将保存</div><div class="v" id="planTotal">0</div></div>
+        <div style="font-size:12.5px;color:var(--text-2)">
+          首歌 · <span id="planTargetText">写入歌曲文件</span> · 预计增加 <b id="planDeltaSize">0</b>
+        </div>
+      </div>
+      <div id="planWarn" hidden></div>
+
+      <div class="optlist">
+        <div class="optrow">
+          <div class="lab"><div class="n">保存到</div></div>
+          <div class="ctl">
+            <div class="seg" id="dlgTarget">
+              <button class="segi on" data-v="file">写入歌曲文件</button>
+              <button class="segi" data-v="sidecar">另存为 .lrc</button>
+            </div>
+          </div>
+        </div>
+        <div class="optrow">
+          <div class="lab">
+            <div class="n">包含翻译歌词</div>
+            <div class="d">歌曲有官方翻译时一并保存</div>
+          </div>
+          <div class="ctl"><span class="sw on" data-dlg="include_translation"></span></div>
+        </div>
+        <div class="optrow">
+          <div class="lab">
+            <div class="n">补全歌曲缺少的信息</div>
+            <div class="d">只填缺少的项，已有内容不会被改动</div>
+          </div>
+          <div class="ctl"><span class="sw on" data-dlg="fill_missing_info"></span></div>
+        </div>
+        <div class="optrow">
+          <div class="lab">
+            <div class="n">保存专辑封面</div>
+            <div class="d">从网络下载封面，每首约增加 0.1–1 MB</div>
+          </div>
+          <div class="ctl"><span class="sw" data-dlg="embed_cover"></span></div>
+        </div>
+        <div class="optrow">
+          <div class="lab">
+            <div class="n">歌曲已有歌词时覆盖</div>
+            <div class="d">关闭时，已带歌词的歌曲会被跳过</div>
+          </div>
+          <div class="ctl"><span class="sw" data-dlg="overwrite_existing"></span></div>
+        </div>
+      </div>
+      <div style="margin-top:11px;font-size:11.5px;color:var(--text-3)">
+        这些选项也可以在「设置」里修改。保存歌曲文件时，歌曲原有的内容和封面保持不变。
+      </div>
+    </div>
+    <div class="modal-f">
+      <div class="grow"></div>
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" id="planConfirm">开始保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ 手动搜索弹窗（流程 C） ═══════════ -->
+<div class="scrim" id="scrimSearch">
+  <div class="modal wide">
+    <div class="modal-h">
+      <div class="ic" style="background:var(--st-writing-bg);color:var(--st-writing)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      </div>
+      <h3>手动搜索歌词</h3>
+      <button data-close><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1.3"/></svg></button>
+    </div>
+    <div class="modal-b">
+      <div class="field" style="width:100%;margin-bottom:14px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="manualQuery" spellcheck="false" placeholder="输入歌名和歌手，例如：夜曲 周杰伦">
+        <button class="btn sm primary" id="manualGo" style="margin-right:-4px">搜索</button>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap" id="manualCount"></div>
+      <div class="candlist" id="manualList"></div>
+      <div id="manualPreview" style="margin-top:12px"></div>
+    </div>
+    <div class="modal-f">
+      <div class="grow" style="font-size:11.5px;color:var(--text-3)" id="manualHint">选中后可先预览歌词</div>
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" id="manualConfirm" disabled>使用这一条</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ 完成报告弹窗（§6.5.3） ═══════════ -->
+<div class="scrim" id="scrimDone">
+  <div class="modal">
+    <div class="modal-h">
+      <div class="ic" style="background:var(--st-matched-bg);color:var(--st-matched)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+      </div>
+      <h3 id="doneTitle">保存完成</h3>
+      <button data-close><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1.3"/></svg></button>
+    </div>
+    <div class="modal-b">
+      <div class="summary">
+        <div><div class="k" id="repOkLabel">保存成功</div><div class="v" id="repOk" style="color:var(--st-matched)">0</div></div>
+        <div><div class="k">跳过</div><div class="v" id="repSkip" style="color:var(--text-3)">0</div></div>
+        <div id="repFailWrap" hidden><div class="k">失败</div><div class="v" id="repFail" style="color:var(--st-failed)">0</div></div>
+      </div>
+      <div class="planlist" id="repList"></div>
+    </div>
+    <div class="modal-f">
+      <div class="grow"></div>
+      <button class="btn primary" data-close>完成</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="./main.js"></script>
+</body>
+</html>

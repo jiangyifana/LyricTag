@@ -1,0 +1,72 @@
+[package]
+name = "lyrictag"
+version = "1.0.0"
+description = "LyricTag · 本地曲库歌词匹配与嵌入工具"
+authors = ["LyricTag"]
+edition = "2021"
+rust-version = "1.77"
+# 本包有两个二进制（桌面应用 + 命令行验证工具），
+# 缺了这行 `cargo run` 会因为无法判断跑哪个而报错。
+default-run = "lyrictag"
+
+[lib]
+name = "lyrictag_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# ── 应用框架 ──────────────────────────────────────────────────────────────
+# tauri 3 尚为 alpha（crates.io latest = 3.0.0-alpha.2），按设计文档 §10 固定 2.x
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+# ── 基础 ──────────────────────────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+async-trait = "0.1"
+once_cell = "1"
+
+# ── 网络（rustls 后端，免除 OpenSSL 依赖） ────────────────────────────────
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls", "gzip", "brotli", "cookies", "json",
+] }
+
+# ── 音频标签读写：核心依赖 ────────────────────────────────────────────────
+lofty = "0.25"
+
+# ── 扫描 / 并行 / 相似度 / 编码 ───────────────────────────────────────────
+walkdir = "2"
+rayon = "1"
+strsim = "0.11"
+regex = "1"
+encoding_rs = "0.8"
+fast2s = "0.3"
+
+# ── 网易云 weapi 加密（AES-128-CBC 双次 + RSA） ───────────────────────────
+aes = "0.8"
+cbc = "0.1"
+base64 = "0.22"
+num-bigint = "0.4"
+
+# ── 杂项 ──────────────────────────────────────────────────────────────────
+html-escape = "0.2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+blake3 = "1"
+toml = "0.8"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# size 优化 profile —— 实测从 7.90 MB 压到 2.81 MB（−64%），设计文档 §9.2
+# 这是本项目体积控制中最有效的一条措施。
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "s"

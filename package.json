@@ -1,0 +1,17 @@
+{
+  "name": "lyrictag",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "LyricTag · 本地曲库歌词匹配与嵌入工具（前端）",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
+    "watch": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.3",
+    "@tauri-apps/cli": "^2"
+  }
+}

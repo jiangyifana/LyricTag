@@ -4,9 +4,11 @@
  * 这一层只做「连线」——所有业务规则都在后端，所有渲染逻辑都在 ui/ 与 views/。
  */
 
-import { $, $$, must, mustInput, toast } from "./dom.js";
+import { $, $$, must, mustInput, STATE_META, toast } from "./dom.js";
 import {
   emptyStats,
+  invalidateRows,
+  isRowVisible,
   loadDetail,
   refresh,
   S,
@@ -16,9 +18,11 @@ import {
 } from "./store.js";
 import { appWindow, invoke, listen, pickDirectory } from "./tauri.js";
 import type {
+  CandidateDto,
   LogDto,
   ProgressDto,
   ScanDoneDto,
+  ScanResultDto,
   Settings,
   SnapshotDto,
   TrackUpdatedDto,
@@ -60,7 +64,6 @@ let activeTasks = 0;
 
 function beginTask(): void {
   activeTasks += 1;
-  S.running = true;
   must("#btnStop").removeAttribute("disabled");
   must("#btnMatch").setAttribute("disabled", "disabled");
   must("#btnWrite").setAttribute("disabled", "disabled");
@@ -70,7 +73,6 @@ function beginTask(): void {
 function endTask(): void {
   activeTasks = Math.max(0, activeTasks - 1);
   if (activeTasks > 0) return;
-  S.running = false;
   must("#btnStop").setAttribute("disabled", "disabled");
   must("#btnMatch").removeAttribute("disabled");
   must("#btnWrite").removeAttribute("disabled");
@@ -154,9 +156,7 @@ async function startScan(path: string): Promise<void> {
   setPhase("正在读取文件夹…", "var(--st-matching)", true);
   resetProgress();
   try {
-    const result = await invoke<{ count: number; skipped: number; path: string }>("scan_library", {
-      path,
-    });
+    const result = await invoke<ScanResultDto>("scan_library", { path });
     appendLog("info", `读取完成，共找到 ${result.count} 首歌`);
     if (result.skipped > 0) {
       appendLog("warn", `有 ${result.skipped} 个文件读不出来，已跳过`);
@@ -352,9 +352,13 @@ async function wireEvents(): Promise<void> {
   await listen<TrackUpdatedDto>("track:updated", (ev) => {
     const row = S.rows.find((r) => r.id === ev.trackId);
     if (!row) return;
-    const before = visibleRows().length;
+    // 只有这一行变了：它的可见性变没变，就等于可见行数变没变——
+    // 不必像以前那样在修改前后各对整表做一次筛选 + 排序
+    const wasVisible = isRowVisible(row);
 
     row.state = ev.state;
+    // 按「状态」列排序比较的是文案，它得跟着状态一起变，否则批量任务期间排序是旧的
+    row.stateLabel = STATE_META[ev.state]?.label ?? row.stateLabel;
     // 「已有歌词」列跟着这一行走：保存完成后它会从「—」/「.lrc」变成「文件内」，
     // 与同一行刚变成的「已写入」对齐
     row.existingLyrics = ev.existingLyrics;
@@ -374,10 +378,12 @@ async function wireEvents(): Promise<void> {
         }
       : undefined;
     if (ev.message !== undefined) row.message = ev.message;
+    // 行对象是就地改的，visibleRows 的记忆结果要作废
+    invalidateRows();
 
     // 状态变化可能让这一行进入/离开当前筛选。行数没变就只重绘可视窗口，
     // 这样批量任务期间列表不会每首歌都跳一次。
-    if (visibleRows().length !== before) renderTable();
+    if (isRowVisible(row) !== wasVisible) renderTable();
     else repaintRows();
 
     renderSmartViews();
@@ -476,9 +482,7 @@ async function bootstrap(): Promise<void> {
 
   // 载入上次的曲库（若有），再拉一次全量快照
   try {
-    const restored = await invoke<{ count: number; restored: number; path: string } | null>(
-      "load_library",
-    );
+    const restored = await invoke<ScanResultDto | null>("load_library");
     if (restored && restored.count > 0) {
       appendLog("info", `已载入上次的音乐库：${restored.count} 首歌`);
       if (restored.restored > 0) {
@@ -637,7 +641,7 @@ async function acceptCurrent(): Promise<void> {
   await pickCandidate(detail.id, candidate);
 }
 
-async function pickCandidate(trackId: number, candidate: unknown): Promise<void> {
+async function pickCandidate(trackId: number, candidate: CandidateDto): Promise<void> {
   try {
     const detail = await invoke<typeof S.detail>("pick_candidate", { trackId, candidate });
     S.detail = detail;

@@ -110,7 +110,6 @@ export interface TrackDetailDto {
   preview?: PreviewDto;
   capabilities: CapabilitiesDto;
   provider?: ProviderKey;
-  canWrite: boolean;
   needsReview: boolean;
 }
 

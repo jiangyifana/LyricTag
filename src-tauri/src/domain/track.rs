@@ -222,8 +222,10 @@ pub fn split_artists(raw: &str) -> Vec<String> {
     if raw.trim().is_empty() {
         return Vec::new();
     }
-    // 先处理 feat. / ft. / with 这类连接词
-    let lowered = raw.to_lowercase();
+    // 先处理 feat. / ft. / with 这类连接词。
+    // 用 ASCII 折叠而不是 `to_lowercase()`：下面拿它的下标去切原串，
+    // 后者会改变 `İ`、开尔文符号 `K` 等字符的字节长度，下标错位就会切在字符中间 panic。
+    let lowered = raw.to_ascii_lowercase();
     let mut text = raw.to_string();
     for token in ["feat.", "feat", "ft.", "with"] {
         if let Some(idx) = lowered.find(token) {
@@ -381,6 +383,16 @@ mod tests {
         let b = TrackId::from_path(std::path::Path::new("D:/M/b.mp3"));
         assert_eq!(a, again);
         assert_ne!(a, b);
+    }
+
+    /// 回归：大小写折叠会改变字节长度的字符，不能让切分下标错位。
+    /// 开尔文符号（U+212A）小写后从 3 字节变成 1 字节，旧实现的下标落进了「晴」的中间，
+    /// 而 release 构建是 `panic = "abort"`——平台返回的一个艺人名就能让进程退出。
+    #[test]
+    fn split_artists_survives_length_changing_case_folds() {
+        let out = split_artists("\u{212A}晴 feat. X");
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].starts_with("\u{212A}晴"), "{out:?}");
     }
 
     /// 评分被否决的曲目**不是**「匹配到了歌词」——它只是「找到过候选」。

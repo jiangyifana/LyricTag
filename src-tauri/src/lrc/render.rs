@@ -89,16 +89,6 @@ pub fn render_lrc(lines: &[LyricLine], opts: &RenderOptions) -> String {
     out
 }
 
-/// 渲染为纯文本（无时间戳）。用于日志与调试，不写入标签。
-pub fn render_plain(lines: &[LyricLine]) -> String {
-    lines
-        .iter()
-        .filter(|l| !l.text.trim().is_empty())
-        .map(|l| l.text.trim().to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// 写入前的歌词结构校验（§8.1「接口返回恶意/异常内容」）。
 ///
 /// 宁可跳过一首歌，也不要往用户的文件里写进播放器解析不了的标签。

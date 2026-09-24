@@ -31,10 +31,6 @@ impl KuWoProvider {
         let limiter = Arc::new(crate::infra::ratelimit::per_source());
         Self { api: KuWoApi::new(http, limiter) }
     }
-
-    pub fn api(&self) -> &KuWoApi {
-        &self.api
-    }
 }
 
 #[async_trait]

@@ -104,8 +104,3 @@ export function appendLog(level: LogDto["level"], message: string): void {
   }
   inner.scrollTop = inner.scrollHeight;
 }
-
-export function clearLog(): void {
-  must("#logInner").innerHTML = "";
-  logCount = 0;
-}

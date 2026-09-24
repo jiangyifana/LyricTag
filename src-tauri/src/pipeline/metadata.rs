@@ -130,7 +130,7 @@ pub fn extract(path: &Path, tagged: &TrackMeta, root: Option<&Path>) -> Extracte
     }
 
     // ── L4：兜底 ──
-    if meta.title.as_deref().is_none_or(|t| t.trim().is_empty()) {
+    if meta.title.as_deref().map_or(true, |t| t.trim().is_empty()) {
         meta.title = path
             .file_stem()
             .map(|s| s.to_string_lossy().trim().to_string())
@@ -271,13 +271,13 @@ fn from_directories(path: &Path, root: Option<&Path>) -> Option<(TrackMeta, f32)
 
 /// 用 `other` 填补 `base` 中为空的字段——**绝不覆盖已有值**
 fn fill_gaps(mut base: TrackMeta, other: &TrackMeta) -> TrackMeta {
-    if base.title.as_deref().is_none_or(|s| s.trim().is_empty()) {
+    if base.title.as_deref().map_or(true, |s| s.trim().is_empty()) {
         base.title = other.title.clone();
     }
-    if base.artist.as_deref().is_none_or(|s| s.trim().is_empty()) {
+    if base.artist.as_deref().map_or(true, |s| s.trim().is_empty()) {
         base.artist = other.artist.clone();
     }
-    if base.album.as_deref().is_none_or(|s| s.trim().is_empty()) {
+    if base.album.as_deref().map_or(true, |s| s.trim().is_empty()) {
         base.album = other.album.clone();
     }
     if base.track_no.is_none() {

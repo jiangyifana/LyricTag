@@ -78,27 +78,11 @@ fn find_nearby(trans: &[LyricLine], used: &[bool], at_ms: u64) -> Option<usize> 
             continue;
         }
         let d = t.at_ms.abs_diff(at_ms);
-        if d <= TOLERANCE_MS && best.is_none_or(|(_, bd)| d < bd) {
+        if d <= TOLERANCE_MS && best.map_or(true, |(_, bd)| d < bd) {
             best = Some((i, d));
         }
     }
     best.map(|(i, _)| i)
-}
-
-/// 罗马音合并：与译文同理，但合并进独立的字段由渲染层决定
-pub fn merge_roma(origin: &[LyricLine], roma: &[LyricLine]) -> Vec<LyricLine> {
-    if roma.is_empty() || origin.len() != roma.len() {
-        return origin.to_vec();
-    }
-    origin
-        .iter()
-        .zip(roma.iter())
-        .map(|(o, r)| LyricLine {
-            at_ms: o.at_ms,
-            text: o.text.clone(),
-            trans: o.trans.clone().or_else(|| Some(r.text.clone())),
-        })
-        .collect()
 }
 
 #[cfg(test)]

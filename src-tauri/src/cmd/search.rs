@@ -74,23 +74,7 @@ pub async fn preview_candidate(
     if !lyrics.has_content() {
         return Err("这个来源没有可用的歌词".into());
     }
-
-    let merged = crate::lrc::merge::merge_translation(&lyrics.lines, &lyrics.trans);
-    let text = crate::lrc::render::render_lrc(
-        &merged,
-        &crate::lrc::render::RenderOptions {
-            one_line: crate::lrc::render::MERGE_TRANSLATION_ONE_LINE,
-            include_translation: settings.lyrics.include_translation,
-            strip_credits: false,
-        },
-    );
-    Ok(PreviewDto {
-        lines: merged.iter().filter(|l| !l.text.trim().is_empty()).count(),
-        bytes: text.len(),
-        has_translation: lyrics.has_translation(),
-        has_verbatim: lyrics.has_verbatim(),
-        text,
-    })
+    Ok(dto::preview_of(&lyrics, &settings))
 }
 
 /// 把某个候选应用为该曲的匹配结果（「使用这一条」）。

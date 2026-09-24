@@ -6,6 +6,9 @@
 //! - `SONGNAME` 含 HTML 实体与杂讯：`那一年那一天&nbsp;(cover:&nbsp;朱海波)`
 //! - **不返回发行年份** —— UI 上必须明确标注，不要假装有
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
@@ -34,9 +37,23 @@ fn field_re(key: &str) -> Regex {
     Regex::new(&pattern).expect("酷我字段正则")
 }
 
-fn field(obj: &str, key: &str) -> Option<String> {
-    let re = field_re(key);
-    let caps = re.captures(obj)?;
+/// 按键缓存编译好的字段正则。
+///
+/// 一次搜索要对十来条结果各抽八九个字段，每次现编译正则是这里最大的 CPU 开销。
+/// 键都是写死在源码中的字面量、数量固定，编译结果直接 leak 成 `'static`：
+/// 查表之后既不用克隆，也不必持锁去做匹配。
+fn cached_field_re(key: &'static str) -> &'static Regex {
+    static CACHE: Lazy<Mutex<HashMap<&'static str, &'static Regex>>> =
+        Lazy::new(|| Mutex::new(HashMap::new()));
+    CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(key)
+        .or_insert_with(|| &*Box::leak(Box::new(field_re(key))))
+}
+
+fn field(obj: &str, key: &'static str) -> Option<String> {
+    let caps = cached_field_re(key).captures(obj)?;
     let raw = caps
         .get(1)
         .or_else(|| caps.get(2))
@@ -48,7 +65,7 @@ fn field(obj: &str, key: &str) -> Option<String> {
 }
 
 /// 把 `abslist` 里的每个对象切出来（按花括号配对，且跳过引号内的括号）
-fn split_objects(list: &str) -> Vec<String> {
+fn split_objects(list: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut start: Option<usize> = None;
@@ -73,7 +90,7 @@ fn split_objects(list: &str) -> Vec<String> {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     if let Some(s) = start.take() {
-                        out.push(list[s..=i].to_string());
+                        out.push(&list[s..=i]);
                     }
                 }
             }
@@ -125,16 +142,16 @@ pub fn parse_search(body: &str) -> Vec<Candidate> {
         .into_iter()
         .filter_map(|obj| {
             // 歌曲 ID：优先 DC_TARGETID（纯数字），其次从 MUSICRID（MUSIC_228107872）里剥出来
-            let song_id = field(&obj, "DC_TARGETID")
+            let song_id = field(obj, "DC_TARGETID")
                 .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
                 .or_else(|| {
-                    field(&obj, "MUSICRID")
+                    field(obj, "MUSICRID")
                         .map(|s| s.trim_start_matches("MUSIC_").to_string())
                         .filter(|s| !s.is_empty())
                 })?;
 
-            let title_raw = field(&obj, "SONGNAME")?;
-            let artists_raw = field(&obj, "ARTIST").unwrap_or_default();
+            let title_raw = field(obj, "SONGNAME")?;
+            let artists_raw = field(obj, "ARTIST").unwrap_or_default();
 
             let artists: Vec<String> = crate::domain::track::split_artists(&artists_raw)
                 .into_iter()
@@ -148,7 +165,7 @@ pub fn parse_search(body: &str) -> Vec<Candidate> {
                 // clean_display_title 内含 HTML 反转义——酷我的 SONGNAME 常带 &nbsp; 与杂讯
                 title: clean_display_title(&title_raw),
                 artists,
-                album: field(&obj, "ALBUM")
+                album: field(obj, "ALBUM")
                     .map(|a| clean_display_title(&a))
                     .filter(|a| !a.is_empty())
                     // 实测 ALBUM 值结尾常带多余标点：`那一年那一天，`
@@ -156,8 +173,8 @@ pub fn parse_search(body: &str) -> Vec<Candidate> {
                 // **酷我接口不返回发行年份**（§9.7.4）——这里恒为 None
                 year: None,
                 track_no: None,
-                duration_ms: field(&obj, "DURATION").and_then(|d| d.parse::<u64>().ok()).map(to_ms).filter(|v| *v > 0),
-                cover_url: cover_url(&obj),
+                duration_ms: field(obj, "DURATION").and_then(|d| d.parse::<u64>().ok()).map(to_ms).filter(|v| *v > 0),
+                cover_url: cover_url(obj),
                 score: MatchScore::default(),
             })
         })

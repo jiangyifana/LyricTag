@@ -231,7 +231,6 @@
         noTranslationVerified: false
       },
       provider: cands[0] ? cands[0].provider : undefined,
-      canWrite: row.format !== "WMA",
       needsReview: row.title === "贏" || row.title === "星夢"
     };
   }

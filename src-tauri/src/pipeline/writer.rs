@@ -5,10 +5,12 @@
 //! 「写入计划」正是这个检查点在数据层面的表达：所有会导致跳过的原因
 //! 都能在真正动文件之前算出来，并汇总进保存确认弹窗。
 
+use crate::domain::lyrics::{LyricLine, Lyrics};
 use crate::domain::plan::{CoverBytes, WriteAction, WriteOutcome, WritePayload, WritePlan, WritePlanItem};
-use crate::domain::track::{Track, TrackState};
+use crate::domain::track::Track;
 use crate::infra::config::{SaveTarget, Settings};
 use crate::infra::error::{AppError, Result};
+use crate::lrc::merge::merge_translation;
 use crate::lrc::render::{self, RenderOptions};
 use crate::tag;
 
@@ -83,14 +85,9 @@ fn expected_delta(
     settings: &Settings,
     action: &WriteAction,
 ) -> i64 {
-    if matches!(
-        action,
-        WriteAction::SkipExistingLyrics | WriteAction::SkipUnsupportedFormat
-    ) {
-        return 0;
-    }
-    // 旁挂模式不动音频文件，歌曲文件的体积增量恒为 0
-    if target == SaveTarget::Sidecar {
+    // 只有真正会写的曲目才计入：被跳过的（已有歌词、格式不支持、文件被占用、还没匹配）
+    // 一个字节都不会动。旁挂模式不动音频文件，歌曲文件的体积增量恒为 0。
+    if !action.is_write() || target == SaveTarget::Sidecar {
         return 0;
     }
 
@@ -98,7 +95,7 @@ fn expected_delta(
     let lyrics_bytes = t
         .matched
         .as_ref()
-        .map(|m| estimated_payload_bytes(m, settings))
+        .map(|m| render_lyrics(&m.lyrics, settings).1.len())
         .unwrap_or(0) as i64;
 
     let cover_bytes = if settings.write.embed_cover && !t.meta.has_cover {
@@ -110,19 +107,22 @@ fn expected_delta(
     lyrics_bytes + cover_bytes
 }
 
-fn estimated_payload_bytes(m: &crate::domain::plan::MatchResult, settings: &Settings) -> usize {
-    let merged = crate::lrc::merge::merge_translation(&m.lyrics.lines, &m.lyrics.trans);
-    let text = render::render_lrc(&merged, &render_options(settings, false));
-    text.len()
-}
-
-fn render_options(settings: &Settings, sidecar: bool) -> RenderOptions {
-    RenderOptions {
-        one_line: render::MERGE_TRANSLATION_ONE_LINE,
-        // 旁挂文件与标签用同一套渲染规则，用户设置对两者一致生效
-        include_translation: settings.lyrics.include_translation && !sidecar || settings.lyrics.include_translation,
-        strip_credits: false,
-    }
+/// 按用户设置渲染最终写入的歌词：合并译文 → 渲染 LRC。
+///
+/// 预览、体积估算、真正写入都走这一条路径——三处各算各的，预览里看到的
+/// 就可能不再是写进文件里的东西。返回合并后的行（结构校验要用）与渲染好的文本。
+pub fn render_lyrics(lyrics: &Lyrics, settings: &Settings) -> (Vec<LyricLine>, String) {
+    let merged = merge_translation(&lyrics.lines, &lyrics.trans);
+    let text = render::render_lrc(
+        &merged,
+        &RenderOptions {
+            one_line: render::MERGE_TRANSLATION_ONE_LINE,
+            // 旁挂文件与标签用同一套渲染规则，用户设置对两者一致生效
+            include_translation: settings.lyrics.include_translation,
+            strip_credits: false,
+        },
+    );
+    (merged, text)
 }
 
 /// 组装写入载荷。三项产物各有独立开关（§4.2.5）。
@@ -138,9 +138,7 @@ pub fn build_payload(
         .ok_or_else(|| AppError::Other("这首歌还没有匹配结果".into()))?;
 
     // 1. 合并译文并按设置渲染
-    let merged = crate::lrc::merge::merge_translation(&m.lyrics.lines, &m.lyrics.trans);
-    let opts = render_options(settings, target == SaveTarget::Sidecar);
-    let text = render::render_lrc(&merged, &opts);
+    let (merged, text) = render_lyrics(&m.lyrics, settings);
 
     // 2. 结构校验——宁可跳过一首歌，也不给用户写进播放器解析不了的标签（§8.1）
     render::validate(&merged, &text)?;
@@ -168,12 +166,6 @@ pub fn execute(
     tag::save(target, &track.path, &payload)
 }
 
-/// 这首歌是否已经到了可以写入的状态
-pub fn is_writable_state(t: &Track) -> bool {
-    matches!(t.state, TrackState::Matched | TrackState::Confirm | TrackState::Done)
-        && t.matched.is_some()
-}
-
 /// 这首歌是否因为元信息可信度太低而需要人工确认（§4.1）
 pub fn needs_review(t: &Track) -> bool {
     t.meta_confidence < LOW_CONFIDENCE
@@ -183,9 +175,8 @@ pub fn needs_review(t: &Track) -> bool {
 mod tests {
     use super::*;
     use crate::domain::candidate::{Candidate, Confidence, MatchScore, ProviderId};
-    use crate::domain::lyrics::{LyricLine, Lyrics};
     use crate::domain::plan::MatchResult;
-    use crate::domain::track::{AudioFormat, LyricsPresence, TrackId, TrackMeta};
+    use crate::domain::track::{AudioFormat, LyricsPresence, TrackId, TrackMeta, TrackState};
     use std::path::PathBuf;
 
     fn track(state: TrackState, presence: LyricsPresence) -> Track {
@@ -378,13 +369,27 @@ mod tests {
         assert_eq!(p.items[0].expected_delta, 0);
     }
 
+    /// 回归：被跳过的曲目一个字节都不会写，不能计入「预计增加 xx KB」。
+    /// 旧实现只排除了「已有歌词」「格式不支持」两种跳过，没匹配、被占用的歌
+    /// 仍按歌词 + 封面估了体积，弹窗里的数字比实际写入的大。
     #[test]
-    fn writable_state_requires_a_match_result() {
-        assert!(!is_writable_state(&track(TrackState::Matched, LyricsPresence::None)));
-        assert!(is_writable_state(&with_match(track(
-            TrackState::Matched,
-            LyricsPresence::None
-        ))));
+    fn skipped_tracks_do_not_count_towards_the_size_estimate() {
+        let mut s = settings();
+        s.write.embed_cover = true;
+        let t = track(TrackState::Idle, LyricsPresence::None);
+        let p = plan(&[t], SaveTarget::File, &s);
+        assert_eq!(p.items[0].action, WriteAction::SkipNoMatch);
+        assert_eq!(p.items[0].expected_delta, 0);
+        assert_eq!(p.total_delta, 0);
+    }
+
+    /// 预览展示的就是将要写进文件的文本——两边走的是同一条渲染路径
+    #[test]
+    fn preview_rendering_matches_the_written_payload() {
+        let t = with_match(track(TrackState::Matched, LyricsPresence::None));
+        let payload = build_payload(&t, SaveTarget::File, &settings(), None).unwrap();
+        let (_, text) = render_lyrics(&t.matched.as_ref().unwrap().lyrics, &settings());
+        assert_eq!(payload.lrc, text);
     }
 
     #[test]

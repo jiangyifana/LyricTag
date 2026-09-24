@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::track::TrackMeta;
+use super::track::{Track, TrackMeta};
 
 /// 歌词源标识。序列化值必须与前端 `SRC_META` 的键一致。
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
@@ -60,6 +60,15 @@ pub struct SearchQuery {
 }
 
 impl SearchQuery {
+    /// 用曲目自己的元信息组一次检索（自动匹配、手动搜索的默认词、命令行验证共用）
+    pub fn from_track(t: &Track) -> Self {
+        Self {
+            title: t.meta.display_title(),
+            artist: t.meta.display_artist(),
+            duration_secs: t.duration_secs().map(|s| s as u32),
+        }
+    }
+
     /// 用于搜索接口的合并关键词：`归一化(标题) 归一化(主艺人)`。
     ///
     /// **必须归一化**（§4.2.1）。最要紧的是繁→简转换：
@@ -126,15 +135,6 @@ impl Candidate {
             has_cover: self.cover_url.is_some(),
             source: super::track::MetaSource::TagLib,
         }
-    }
-    /// UI 文案：「歌名 · 歌手」（可选带专辑）
-    pub fn display(&self) -> String {
-        let mut s = format!("{} · {}", self.title, self.artist_joined());
-        if let Some(al) = self.album.as_deref().filter(|a| !a.is_empty()) {
-            s.push_str(" · ");
-            s.push_str(al);
-        }
-        s
     }
 }
 

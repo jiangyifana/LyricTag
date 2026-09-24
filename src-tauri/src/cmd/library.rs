@@ -16,17 +16,6 @@ use crate::state::{emit_scan_done, AppState, TaskKind, TauriSink};
 /// 扫描进度节流间隔（与 §4.5.4 的进度事件一致）
 const SCAN_THROTTLE: Duration = Duration::from_millis(100);
 
-/// 请扫描结果落盘。曲库状态必须持久化，否则每次重开都要重新处理整个曲库（§4.5.4）。
-async fn persist(state: &AppState) {
-    let index = {
-        let store = state.store.read().await;
-        store.to_index()
-    };
-    if let Err(e) = library::save_index(&index) {
-        tracing::warn!("曲库索引保存失败：{e}");
-    }
-}
-
 /// 扫描一个目录。
 ///
 /// 返回扫描结果的摘要；逐条进度走 `progress` 事件。
@@ -71,11 +60,13 @@ pub async fn scan_library(
             });
         })
     })
-    .await
-    .map_err(|e| format!("扫描任务异常：{e}"))?;
+    .await;
 
+    // 先注销再处理结果：扫描线程异常退出时，任务表里也不能留下一条「在途」记录
     state.finish_task(handle.id);
-    let outcome = outcome.map_err(|e| e.user_message())?;
+    let outcome = outcome
+        .map_err(|e| format!("扫描任务异常：{e}"))?
+        .map_err(|e| e.user_message())?;
     let count = outcome.tracks.len();
 
     {
@@ -83,7 +74,8 @@ pub async fn scan_library(
         // 保留已写入的成果（见 TrackStore::replace_from_scan）
         store.replace_from_scan(&path, outcome.tracks);
     }
-    persist(&state).await;
+    // 曲库状态必须持久化，否则每次重开都要重新处理整个曲库（§4.5.4）
+    library::persist(&state.store, "扫描结束后").await;
 
     emit_scan_done(
         &app,
@@ -139,11 +131,7 @@ pub async fn load_library(state: State<'_, AppState>) -> Result<Option<ScanResul
 #[tauri::command]
 pub async fn list_tracks(state: State<'_, AppState>) -> Result<LibraryDto, String> {
     let store = state.store.read().await;
-    Ok(LibraryDto {
-        root: store.root().to_string(),
-        tracks: store.all().iter().map(dto::row).collect(),
-        stats: dto::stats(store.all()),
-    })
+    Ok(dto::library(&store))
 }
 
 /// 单曲详情（含候选列表与歌词预览）。
@@ -251,18 +239,15 @@ pub async fn snapshot(state: State<'_, AppState>) -> Result<SnapshotDto, String>
     let running = state.running_task_ids();
     let library = {
         let store = state.store.read().await;
-        LibraryDto {
-            root: store.root().to_string(),
-            tracks: store.all().iter().map(dto::row).collect(),
-            stats: dto::stats(store.all()),
-        }
+        dto::library(&store)
     };
+    let (cache_bytes, cache_entries) = library::cache_stats();
 
     Ok(SnapshotDto {
         library,
         settings,
-        cache_bytes: paths::cache_usage_bytes(),
-        cache_entries: library::cache_entry_count(),
+        cache_bytes,
+        cache_entries,
         running,
     })
 }

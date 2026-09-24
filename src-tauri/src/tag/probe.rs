@@ -7,30 +7,26 @@ use std::path::Path;
 
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::*;
-use lofty::probe::Probe;
 use lofty::tag::ItemKey;
 use lofty::tag::Tag;
 
 use crate::domain::track::{AudioFormat, MetaSource, TrackMeta};
-use crate::infra::error::{AppError, Result};
+use crate::infra::error::Result;
 
 /// 一次探测的全部产出
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Probed {
     pub meta: TrackMeta,
     /// 音频时长（毫秒）
     pub duration_ms: Option<u64>,
     /// 标签里是否已有歌词
     pub has_embedded_lyrics: bool,
-    pub format: Option<AudioFormat>,
+    pub format: AudioFormat,
 }
 
 /// 读取一个音频文件的标签。**只读**，任何情况下都不修改文件。
 pub fn probe(path: &Path) -> Result<Probed> {
-    let tagged = Probe::open(path)
-        .map_err(|e| AppError::TagRead { path: path.to_path_buf(), reason: e.to_string() })?
-        .read()
-        .map_err(|e| AppError::TagRead { path: path.to_path_buf(), reason: e.to_string() })?;
+    let tagged = super::read_tagged(path)?;
 
     let duration_ms = {
         let d = tagged.properties().duration();
@@ -38,7 +34,9 @@ pub fn probe(path: &Path) -> Result<Probed> {
         (ms > 0).then_some(ms)
     };
 
-    let format = super::supported::capability(path).ok().map(|c| c.format);
+    // 格式直接取自这次读取。以前这里又调了一次 `supported::capability`，
+    // 等于把每个文件完整地再解析一遍——扫描阶段的标签解析量因此翻倍。
+    let format = super::supported::format_of(path, tagged.file_type());
 
     // 优先主标签，其次任意标签（有些文件只有 ID3v1 或只有 Vorbis Comment）
     let tag: Option<&Tag> = tagged.primary_tag().or_else(|| tagged.first_tag());
@@ -71,21 +69,6 @@ pub fn probe(path: &Path) -> Result<Probed> {
         has_embedded_lyrics: has_lyrics(tag),
         format,
     })
-}
-
-/// 读取标签里已有的歌词文本（用于预览与「已有歌词时覆盖」判断）
-pub fn read_embedded_lyrics(path: &Path) -> Option<String> {
-    let tagged = Probe::open(path).ok()?.read().ok()?;
-    for tag in tagged.tags() {
-        for key in [ItemKey::UnsyncLyrics, ItemKey::Lyrics] {
-            if let Some(text) = tag.get_string(key) {
-                if !text.trim().is_empty() {
-                    return Some(text.to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 pub fn has_lyrics(tag: &Tag) -> bool {

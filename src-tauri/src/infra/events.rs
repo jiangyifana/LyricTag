@@ -68,7 +68,7 @@ pub struct LogEvent {
 pub struct ScanDone {
     pub count: usize,
     pub elapsed_ms: u64,
-    /// 是否为首次扫描（决定是否显示空状态引导）
+    /// 本次扫描的目录
     pub path: String,
 }
 

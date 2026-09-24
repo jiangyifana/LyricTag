@@ -5,7 +5,7 @@
 //!
 //! 所有方法都**不含 await**，因此调用方可以在临界区外自由使用 async。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::domain::candidate::Candidate;
@@ -43,10 +43,6 @@ impl TrackStore {
         &self.tracks
     }
 
-    pub fn ids(&self) -> Vec<u64> {
-        self.tracks.iter().map(|t| t.id.0).collect()
-    }
-
     pub fn get(&self, id: u64) -> Option<&Track> {
         self.index.get(&id).and_then(|i| self.tracks.get(*i))
     }
@@ -61,16 +57,16 @@ impl TrackStore {
     /// **保留**那些仍然存在、且已被处理过的曲目的状态——否则每次重新选目录
     /// 都会把「已写入」的成果抹掉，用户看到自己刚做完的工作全部归零。
     pub fn replace_from_scan(&mut self, root: &str, scanned: Vec<Track>) {
-        let previous: HashMap<u64, TrackState> = self
+        let done: HashSet<u64> = self
             .tracks
             .iter()
-            .map(|t| (t.id.0, t.state))
-            .filter(|(_, s)| *s == TrackState::Done)
+            .filter(|t| t.state == TrackState::Done)
+            .map(|t| t.id.0)
             .collect();
 
         self.tracks = scanned;
         for t in &mut self.tracks {
-            if previous.contains_key(&t.id.0) {
+            if done.contains(&t.id.0) {
                 t.state = TrackState::Done;
             }
         }
@@ -118,14 +114,6 @@ impl TrackStore {
                 t.candidate_pick = pick;
             }
         }
-    }
-
-    /// 用用户选中的候选构造匹配结果（歌词需另外填充）
-    pub fn craft_match_from_pick(&self, id: u64) -> Option<(Candidate, crate::domain::candidate::Confidence)> {
-        let t = self.get(id)?;
-        let c = t.selected_candidate()?.clone();
-        let confidence = crate::domain::candidate::Confidence::Auto(c.score.total);
-        Some((c, confidence))
     }
 
     fn reindex(&mut self) {
@@ -207,10 +195,10 @@ impl TrackStore {
                 match super::library::load_cached_lyrics(summary.provider, &summary.song_id) {
                     Some(lyrics) => {
                         track.matched = Some(MatchResult {
+                            metadata: candidate.to_meta(),
+                            cover_url: summary.cover_url.clone(),
                             candidate,
                             lyrics,
-                            metadata: summary.candidate().to_meta(),
-                            cover_url: summary.cover_url.clone(),
                             confidence: summary.confidence,
                         });
                         stats.restored += 1;

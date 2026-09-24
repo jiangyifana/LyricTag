@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::infra::events::LogEvent;
 use crate::pipeline::library;
@@ -53,10 +53,7 @@ pub async fn match_tracks(
         let report = orchestrator::run_match(ctx, sink.clone(), track_ids, cancel).await;
 
         // 曲库状态立即落盘：重开软件能接着上次的结果继续（§4.5.4）
-        let index = store.read().await.to_index();
-        if let Err(e) = library::save_index(&index) {
-            tracing::warn!("匹配结束后保存曲库索引失败：{e}");
-        }
+        library::persist(&store, "匹配结束后").await;
 
         // 结束语写成人话，不出现任何技术细节（§6.5.3）
         if !report.sources_down {
@@ -81,13 +78,9 @@ pub async fn match_tracks(
             });
         }
 
-        let _ = app.emit(
-            EVT_TASK_DONE,
-            TaskDoneDto::Match {
-                task_id,
-                report,
-            },
-        );
+        // 先注销再通知：前端收到 task:done 会立刻拉一次快照，那时任务表里不该还挂着它
+        app.state::<AppState>().finish_task(task_id);
+        let _ = app.emit(EVT_TASK_DONE, TaskDoneDto::Match { task_id, report });
     });
 
     Ok(task_id)

@@ -72,7 +72,7 @@ pub fn parse_search(json: &Value) -> Vec<Candidate> {
                 album: util::str_at(s, &["album", "name"])
                     .map(|a| clean_display_title(&a))
                     .filter(|a| !a.is_empty()),
-                year: util::str_at(s, &["time_public"]).and_then(|d| year_from_date(&d)),
+                year: util::str_at(s, &["time_public"]).and_then(|d| util::year_from_date(&d)),
                 // QQ 不提供音轨号（§9.7.5）
                 track_no: None,
                 // `interval` 是秒
@@ -160,12 +160,6 @@ fn extract_nth_tag_text(xml: &str, tag: &str, n: usize) -> Option<String> {
 /// `album.pmid` → 封面 URL（§9.7.2）
 pub fn cover_url_from_pmid(pmid: &str) -> String {
     format!("https://y.qq.com/music/photo_new/T002R500x500M000{pmid}.jpg")
-}
-
-/// `time_public`（`2004-03-01`）→ 年份
-fn year_from_date(s: &str) -> Option<u32> {
-    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
-    (digits.len() == 4).then(|| digits.parse().ok()).flatten()
 }
 
 #[cfg(test)]

@@ -19,11 +19,6 @@ declare global {
   }
 }
 
-/** 在浏览器里直接打开 dist/index.html 调试时不会有 Tauri 环境 */
-export function isTauri(): boolean {
-  return typeof window !== "undefined" && !!window.__TAURI_INTERNALS__;
-}
-
 function internals(): TauriInternals {
   const api = window.__TAURI_INTERNALS__;
   if (!api) throw new Error("当前不在应用环境中运行");
@@ -84,7 +79,6 @@ export const appWindow = {
   minimize: () => invoke<void>("plugin:window|minimize", { label: windowLabel() }),
   toggleMaximize: () => invoke<void>("plugin:window|toggle_maximize", { label: windowLabel() }),
   close: () => invoke<void>("plugin:window|close", { label: windowLabel() }),
-  isMaximized: () => invoke<boolean>("plugin:window|is_maximized", { label: windowLabel() }),
 };
 
 // ── 系统原生对话框（§3.2：目录选择**必须**走系统原生选择框） ─────────────

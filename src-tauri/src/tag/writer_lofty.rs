@@ -16,7 +16,6 @@ use lofty::config::WriteOptions;
 use lofty::file::{TaggedFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::*;
-use lofty::probe::Probe;
 use lofty::tag::{ItemKey, ItemValue, Tag, TagItem, TagType};
 
 use crate::domain::plan::{WriteOutcome, WritePayload, WrittenTarget};
@@ -24,7 +23,7 @@ use crate::infra::error::{AppError, Result};
 
 use super::lock_check;
 
-/// 旁挂 .lrc 的编码前缀（设计文档 §4.6.2 的 `SIDECAR_ENCODING = "utf-8-bom"`）
+/// 旁挂 .lrc 的 BOM 前缀（设计文档 §4.6.2 的 `SIDECAR_ENCODING = "utf-8-bom"`）
 const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
 /// 写进歌曲文件内部。
@@ -33,39 +32,37 @@ pub fn write_native(path: &Path, payload: &WritePayload) -> Result<WriteOutcome>
     lock_check::ensure_not_locked(path)?;
     let original_len = std::fs::metadata(path).map_err(AppError::Io)?.len();
 
-    // 4. 线程不安全但必要的准备：确定歌词字段的尝试顺序
-    let tag_type = Probe::open(path)
-        .map_err(|e| AppError::TagRead { path: path.to_path_buf(), reason: e.to_string() })?
-        .read()
-        .map_err(|e| AppError::TagRead { path: path.to_path_buf(), reason: e.to_string() })?
-        .file_type()
-        .primary_tag_type();
-
-    let key_order: [ItemKey; 2] = match tag_type {
+    // 只读一次：既用来决定歌词字段的尝试顺序，也直接交给第一次写入。
+    // 只有回读校验失败、要换备用字段重试时，才需要重新读文件
+    let first = super::read_tagged(path)?;
+    let key_order: [ItemKey; 2] = match first.file_type().primary_tag_type() {
         // ID3v2 有独立的同步歌词帧，lofty 无法从 Lyrics 映射过去 → 必须用 UnsyncLyrics
         TagType::Id3v2 => [ItemKey::UnsyncLyrics, ItemKey::Lyrics],
         // 其余格式（Vorbis Comment / MP4 ilst / APE）优先 Lyrics
         _ => [ItemKey::Lyrics, ItemKey::UnsyncLyrics],
     };
+    let mut pending = Some(first);
 
     let mut last_error: Option<AppError> = None;
     for (idx, key) in key_order.iter().enumerate() {
-        match apply_and_save(path, *key, payload) {
-            Ok(()) => {}
-            Err(e) => {
-                // 文件被占用 / 格式不支持一类的错误重试另一个字段也没有意义
-                if matches!(
-                    e,
-                    AppError::FileLocked { .. } | AppError::FormatNotWritable { .. } | AppError::Io(_)
-                ) {
-                    return Err(e);
-                }
-                last_error = Some(e);
-                continue;
+        // 重试时文件已经被写过一次，手里那份读取结果已经过时
+        let tagged = match pending.take() {
+            Some(tagged) => Ok(tagged),
+            None => super::read_tagged(path),
+        };
+        if let Err(e) = tagged.and_then(|t| apply_and_save(t, path, *key, payload)) {
+            // 文件被占用 / 格式不支持一类的错误重试另一个字段也没有意义
+            if matches!(
+                e,
+                AppError::FileLocked { .. } | AppError::FormatNotWritable { .. } | AppError::Io(_)
+            ) {
+                return Err(e);
             }
+            last_error = Some(e);
+            continue;
         }
 
-        // 8. 写后校验——读回并**比对内容**，防「写了但没生效」的静默失败
+        // 写后校验——读回并**比对内容**，防「写了但没生效」的静默失败
         if verify(path, &payload.lrc) {
             let new_len = std::fs::metadata(path).map_err(AppError::Io)?.len();
             return Ok(WriteOutcome {
@@ -89,18 +86,19 @@ pub fn write_native(path: &Path, payload: &WritePayload) -> Result<WriteOutcome>
     Err(last_error.unwrap_or(AppError::VerifyFailed { path: path.to_path_buf() }))
 }
 
-/// 打开 → 改标签 → 落盘。不做校验（校验由 [`verify`] 独立完成）。
-fn apply_and_save(path: &Path, lyrics_key: ItemKey, payload: &WritePayload) -> Result<()> {
-    // 1. 打开并读取现有标签（保留原有全部字段与封面）
-    let mut tagged = Probe::open(path)
-        .map_err(|e| AppError::TagRead { path: path.to_path_buf(), reason: e.to_string() })?
-        .read()
-        .map_err(|e| AppError::TagRead { path: path.to_path_buf(), reason: e.to_string() })?;
-
+/// 改标签 → 落盘。不做校验（校验由 [`verify`] 独立完成）。
+///
+/// `tagged` 必须是刚刚读取 `path` 得到的——它保留着原有的全部字段与封面。
+fn apply_and_save(
+    mut tagged: TaggedFile,
+    path: &Path,
+    lyrics_key: ItemKey,
+    payload: &WritePayload,
+) -> Result<()> {
     let file_type = tagged.file_type();
     let tag_type = file_type.primary_tag_type();
 
-    // 2. 格式能力预检——不支持则提前失败，绝不半写
+    // 1. 格式能力预检——不支持则提前失败，绝不半写
     if !file_type.tag_support(tag_type).is_writable() {
         return Err(AppError::FormatNotWritable { format: format!("{file_type:?}") });
     }
@@ -108,7 +106,7 @@ fn apply_and_save(path: &Path, lyrics_key: ItemKey, payload: &WritePayload) -> R
     // 记录所有标签里已有的值，用于「只填空白字段」判定
     let existing = collect_existing(&tagged);
 
-    // 3. 取得（或创建）主标签
+    // 2. 取得（或创建）主标签
     if tagged.primary_tag().is_none() {
         tagged.insert_tag(Tag::new(tag_type));
     }
@@ -116,13 +114,13 @@ fn apply_and_save(path: &Path, lyrics_key: ItemKey, payload: &WritePayload) -> R
         .primary_tag_mut()
         .ok_or(AppError::FormatNotWritable { format: format!("{file_type:?}") })?;
 
-    // 4. 歌词
+    // 3. 歌词
     tag.insert(TagItem::new(
         lyrics_key,
         ItemValue::Text(payload.lrc.clone()),
     ));
 
-    // 5. 元信息补齐（仅在用户开启且原值为空时；绝不覆盖已有值）
+    // 4. 元信息补齐（仅在用户开启且原值为空时；绝不覆盖已有值）
     if payload.fill_missing_metadata {
         fill_if_empty(tag, &existing, ItemKey::TrackTitle, payload.metadata.title.as_deref());
         fill_if_empty(tag, &existing, ItemKey::TrackArtist, payload.metadata.artist.as_deref());
@@ -147,7 +145,7 @@ fn apply_and_save(path: &Path, lyrics_key: ItemKey, payload: &WritePayload) -> R
         );
     }
 
-    // 6. 封面（仅当原文件无封面；默认关闭，用户显式开启才执行）
+    // 5. 封面（仅当原文件无封面；默认关闭，用户显式开启才执行）
     if payload.embed_cover && tag.pictures().is_empty() {
         if let Some(cover) = &payload.cover {
             tag.push_picture(
@@ -160,7 +158,7 @@ fn apply_and_save(path: &Path, lyrics_key: ItemKey, payload: &WritePayload) -> R
         }
     }
 
-    // 7. 落盘
+    // 6. 落盘
     tagged
         .save_to_path(path, WriteOptions::default())
         .map_err(|e| AppError::TagWrite { path: path.to_path_buf(), reason: e.to_string() })?;
@@ -172,7 +170,7 @@ fn apply_and_save(path: &Path, lyrics_key: ItemKey, payload: &WritePayload) -> R
 /// **这是内部必然行为，不对外暴露开关**（§4.4.3）。比对内容而非仅判断存在性——
 /// 否则「文件本来就有歌词」会让校验产生假阳性。
 fn verify(path: &Path, expected: &str) -> bool {
-    let Ok(tagged) = Probe::open(path).and_then(|p| p.read()) else {
+    let Ok(tagged) = super::read_tagged(path) else {
         return false;
     };
     let want = expected.trim();

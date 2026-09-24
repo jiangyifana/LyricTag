@@ -61,8 +61,7 @@ pub fn parse(text: &str) -> ParsedLrc {
         // 收集本行所有时间标签
         let mut rest = trimmed;
         let mut stamps: Vec<u64> = Vec::new();
-        loop {
-            let Some(cap) = TS_RE.captures(rest) else { break };
+        while let Some(cap) = TS_RE.captures(rest) {
             let whole = cap.get(0).map(|m| m.end()).unwrap_or(0);
             let minutes: u64 = cap[1].parse().unwrap_or(0);
             let seconds: u64 = cap[2].parse().unwrap_or(0);
@@ -168,7 +167,8 @@ pub fn is_pure_metadata(text: &str) -> bool {
     if t.chars().count() > 40 {
         return false;
     }
-    KEYS.iter().any(|k| t.starts_with(k) || t.replace(' ', "").starts_with(k))
+    let compact = t.replace(' ', "");
+    KEYS.iter().any(|k| t.starts_with(k) || compact.starts_with(k))
 }
 
 #[cfg(test)]

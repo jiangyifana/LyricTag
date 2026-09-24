@@ -8,10 +8,10 @@
 use base64::Engine;
 use serde_json::Value;
 
-use crate::domain::lyrics::{looks_instrumental, LyricLine, Lyrics};
+use crate::domain::lyrics::{looks_instrumental, Lyrics};
 use crate::domain::candidate::ProviderId;
 use crate::infra::error::{AppError, Result};
-use crate::lrc::{self, RenderOptions};
+use crate::lrc;
 
 /// 按路径逐层取子节点
 pub fn get<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -192,23 +192,10 @@ pub fn build_lyrics(
     }
 }
 
-/// 预览渲染：把歌词渲染成 `[mm:ss.xx]文本` 的展示文本（含译文）。
-/// 只用于界面预览，不落盘。
-pub fn render_preview(lyrics: &Lyrics, include_translation: bool) -> String {
-    let merged = lrc::merge::merge_translation(&lyrics.lines, &lyrics.trans);
-    lrc::render::render_lrc(
-        &merged,
-        &RenderOptions {
-            one_line: true,
-            include_translation: include_translation && lyrics.has_translation(),
-            strip_credits: false,
-        },
-    )
-}
-
-/// 供测试与调试：把一组歌词行渲染成固定文本
-pub fn render_lines(lines: &[LyricLine]) -> String {
-    lrc::render::render_lrc(lines, &RenderOptions::default())
+/// 从日期字符串里取年份：`2004-03-01` → 2004。开头不是四位数字时返回 `None`。
+pub fn year_from_date(s: &str) -> Option<u32> {
+    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+    (digits.len() == 4).then(|| digits.parse().ok()).flatten()
 }
 
 #[cfg(test)]
@@ -268,5 +255,13 @@ mod tests {
     fn escaped_newlines_are_decoded() {
         let out = normalize_lyric_payload("[00:01.00]a\\n[00:02.00]b");
         assert_eq!(out.lines().count(), 2, "{out:?}");
+    }
+
+    #[test]
+    fn year_is_taken_from_the_leading_four_digits() {
+        assert_eq!(year_from_date("2004-03-01"), Some(2004));
+        assert_eq!(year_from_date("2021"), Some(2021));
+        assert_eq!(year_from_date("03-01"), None);
+        assert_eq!(year_from_date(""), None);
     }
 }

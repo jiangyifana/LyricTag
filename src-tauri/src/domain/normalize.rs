@@ -37,15 +37,20 @@ pub fn strip_bracketed(s: &str) -> String {
 }
 
 /// 去掉噪声后缀：`_Official`、`- 副本`、`.mp3的副本`、` HQ` 等。
+///
+/// 大小写折叠**只能用 ASCII 版本**：下面拿小写副本里的下标去截断原串，
+/// 而 `to_lowercase()` 会改变部分字符的字节长度（`İ` 2→3 字节、开尔文符号 `K` 3→1 字节），
+/// 下标一旦错位就会截在字符中间直接 panic——release 构建是 `panic = "abort"`，
+/// 等于一个文件名就能让整个扫描进程崩溃。后缀本身只含 ASCII 字母，ASCII 折叠已经足够。
 pub fn strip_noise(s: &str) -> String {
     let mut t = s.to_string();
-    // 常见下载器 / 网盘产生的后缀
+    // 常见下载器 / 网盘产生的后缀（已是小写）
     for suffix in [
         "的副本", "- 副本", "_副本", "_official", "-official", "_hq", "_hd", " 副本",
     ] {
         loop {
-            let lower = t.to_lowercase();
-            match lower.rfind(&suffix.to_lowercase()) {
+            let lower = t.to_ascii_lowercase();
+            match lower.rfind(suffix) {
                 Some(idx) if idx + suffix.len() >= lower.trim_end().len() => {
                     t.truncate(idx);
                 }
@@ -54,7 +59,7 @@ pub fn strip_noise(s: &str) -> String {
         }
     }
     // 去掉可能残留的音频扩展名（文件名被整段当作标题时会带上）
-    let lower = t.to_lowercase();
+    let lower = t.to_ascii_lowercase();
     for ext in [".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aiff", ".ape", ".wv", ".wma"] {
         if lower.ends_with(ext) {
             t.truncate(t.len() - ext.len());
@@ -235,32 +240,6 @@ pub fn clean_artist(s: &str) -> String {
         .to_string()
 }
 
-/// 从原始标题中提取出「版本标记」部分，供评分与 UI 提示使用。
-pub fn version_markers(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut depth = 0usize;
-    let mut cur = String::new();
-    for c in s.chars() {
-        match c {
-            '(' | '[' | '（' | '【' => {
-                if depth == 0 {
-                    cur.clear();
-                }
-                depth += 1;
-            }
-            ')' | ']' | '）' | '】' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 && !cur.trim().is_empty() {
-                    out.push(cur.trim().to_string());
-                }
-            }
-            _ if depth > 0 => cur.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +266,17 @@ mod tests {
         assert_eq!(normalize("告白气球_Official"), "告白气球");
     }
 
+    /// 回归：大小写折叠会改变字节长度的字符，不能让截断下标错位。
+    ///
+    /// 旧实现用 `to_lowercase()` 副本里的下标去截原串：`İ` 在前面时截在了
+    /// 「的」的中间（release 下整个进程 abort），`_Official` 则被截成残缺的 `İstanbul_`。
+    #[test]
+    fn noise_stripping_survives_length_changing_case_folds() {
+        assert_eq!(strip_noise("İ的副本"), "İ");
+        assert_eq!(strip_noise("\u{212A}晴天的副本"), "\u{212A}晴天");
+        assert_eq!(strip_noise("İstanbul_Official"), "İstanbul");
+    }
+
     /// 测试曲库里的两个文件都是繁体标题，这条断言保证匹配链路可用。
     #[test]
     fn traditional_becomes_simplified() {
@@ -302,13 +292,6 @@ mod tests {
         assert!(is_garbled("\u{FFFD}\u{FFFD}\u{FFFD}abc"));
         assert!(!is_garbled("晴天"));
         assert!(!is_garbled("Bohemian Rhapsody"));
-    }
-
-    #[test]
-    fn version_markers_extracted() {
-        assert_eq!(version_markers("晴天 (Live)"), vec!["Live"]);
-        assert_eq!(version_markers("慢慢喜欢你（伴奏）"), vec!["伴奏"]);
-        assert!(version_markers("夜曲").is_empty());
     }
 
     /// 实测踩坑（酷我）：正则从伪 JSON 里抽出来的字段带着**字面量**转义序列

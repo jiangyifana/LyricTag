@@ -11,16 +11,13 @@ import {
   STATE_META,
   scoreClass,
 } from "../dom.js";
-import { S, visibleRows } from "../store.js";
+import { S, visibleRows, type SortKey } from "../store.js";
 import type { TrackRowDto } from "../types.js";
 
 /** 行高（与 CSS 的 `--row-h` 一致，虚拟滚动靠它算位置） */
 const ROW_H = 40;
 /** 视口外多渲染几行，滚动时不至于露出空白 */
 const OVERSCAN = 8;
-
-/** 可排序的列。必须与 `.thead .sortable[data-sort]` 的取值一致。 */
-export type SortKey = "title" | "artist" | "duration" | "state" | "score";
 
 export interface TableHandlers {
   onSelect(id: number): void;

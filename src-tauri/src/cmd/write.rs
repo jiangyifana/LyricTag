@@ -7,10 +7,11 @@
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::cmd::dto::WritePlanDto;
 use crate::cmd::task::{TaskDoneDto, EVT_TASK_DONE};
+use crate::domain::track::Track;
 use crate::infra::config::{SaveTarget, Settings};
 use crate::infra::events::LogEvent;
 use crate::pipeline::library;
@@ -33,15 +34,18 @@ pub async fn plan_write(
         None => state.settings_snapshot(),
     };
 
-    let plan = {
+    let tracks: Vec<Track> = {
         let store = state.store.read().await;
-        let tracks: Vec<crate::domain::track::Track> = track_ids
-            .iter()
-            .filter_map(|id| store.get(*id))
-            .cloned()
-            .collect();
-        writer::plan(&tracks, settings.lyrics.save_target, &settings)
+        track_ids.iter().filter_map(|id| store.get(*id)).cloned().collect()
     };
+    // 预演要逐首探测格式与文件占用（同步文件 IO），拿到快照后就放掉曲库读锁
+    let target = settings.lyrics.save_target;
+    let plan_settings = settings.clone();
+    // 每首歌要开两次文件（可写性 + 占用探测），整库预演时是几万次同步 IO。
+    // 放到阻塞线程池，别让这条命令把运行时的异步工作线程占住。
+    let plan = tokio::task::spawn_blocking(move || writer::plan(&tracks, target, &plan_settings))
+        .await
+        .map_err(|e| format!("保存预演异常：{e}"))?;
 
     Ok(WritePlanDto {
         total: plan.writable(),
@@ -51,7 +55,7 @@ pub async fn plan_write(
         skipped_existing: plan.skipped_existing(),
         skipped_unsupported: plan.skipped_unsupported(),
         skipped_no_match: plan.skipped_no_match(),
-        target: settings.lyrics.save_target.as_str().to_string(),
+        target: target.as_str().to_string(),
     })
 }
 
@@ -100,10 +104,7 @@ pub async fn write_tracks(
             orchestrator::run_write(ctx, sink.clone(), track_ids, target, settings, cancel).await;
 
         // 落盘：已写入的状态必须活过重启（§4.5.4）
-        let index = store.read().await.to_index();
-        if let Err(e) = library::save_index(&index) {
-            tracing::warn!("写入结束后保存曲库索引失败：{e}");
-        }
+        library::persist(&store, "写入结束后").await;
 
         // 一句人话总结（§6.5.3）
         if report.cancelled {
@@ -143,6 +144,8 @@ pub async fn write_tracks(
             });
         }
 
+        // 先注销再通知：前端收到 task:done 会立刻拉一次快照，那时任务表里不该还挂着它
+        app.state::<AppState>().finish_task(task_id);
         let _ = app.emit(EVT_TASK_DONE, TaskDoneDto::Write { task_id, report });
     });
 

@@ -6,9 +6,18 @@
  * 操作区固定在面板底部（不随内容滚动），选完候选不需要滚动去找按钮。
  */
 
-import { esc, fmtDur, fmtSize, must, renderLrc, SRC_META, scoreClass, STATE_META } from "../dom.js";
+import {
+  candidateCardHtml,
+  esc,
+  fmtDur,
+  fmtSize,
+  must,
+  renderLrc,
+  scoreClass,
+  STATE_META,
+} from "../dom.js";
 import { S } from "../store.js";
-import type { CandidateDto, TrackDetailDto } from "../types.js";
+import type { TrackDetailDto } from "../types.js";
 
 export interface DetailHandlers {
   onPickCandidate(index: number): void;
@@ -124,7 +133,13 @@ export function renderDetail(detail: TrackDetailDto | null): void {
       </div>
       ${candidateNote(detail)}
       <div class="candlist ${detail.state === "confirm" ? "pick" : ""}">
-        ${detail.candidates.length ? detail.candidates.map(candidateHtml(detail.pick, pickable)).join("") : '<div class="nocand">还没有候选。点「匹配歌词」或「手动搜索」试试</div>'}
+        ${
+          detail.candidates.length
+            ? detail.candidates
+                .map((c, i) => candidateCardHtml(c, i, { on: pickable && i === detail.pick, pickable }))
+                .join("")
+            : '<div class="nocand">还没有候选。点「匹配歌词」或「手动搜索」试试</div>'
+        }
       </div>
     </div>
 
@@ -213,36 +228,6 @@ function capabilityHints(detail: TrackDetailDto): string {
   }
   if (notes.length === 0) return "";
   return `<div class="caphint">${notes.map((n) => `<div class="caphint-n">${esc(n)}</div>`).join("")}</div>`;
-}
-
-function candidateHtml(pick: number, pickable: boolean): (c: CandidateDto, i: number) => string {
-  return (c, i) => {
-    const src = SRC_META[c.provider] ?? { name: c.provider, cls: "netease" };
-    const cls = scoreClass(c.score);
-    const on = pickable && i === pick;
-    // 不可选时连 data-cand 都不给：点了没反应，比点了弹出一个假的「选中」好
-    return `<div class="cand ${on ? "on" : ""} ${pickable ? "" : "ro"}" ${pickable ? `data-cand="${i}"` : ""}>
-      <div class="cand-h">
-        <span class="rk ${on ? "checked" : ""}">${i + 1}</span>
-        <span class="ti trunc">${esc(c.title)}</span>
-        <span class="sc ${cls}">${c.score.toFixed(2)}</span>
-      </div>
-      <div class="cand-b">
-        <span class="cb-left">
-          <span class="nowrap">${esc(c.artist) || "—"}</span>
-          <span class="sep">·</span>
-          <span class="trunc album" title="${esc(c.album || "专辑未填")}">${esc(c.album || "专辑未填")}</span>
-        </span>
-        <span class="cb-right">
-          <span class="num">${fmtDur(c.duration)}</span>
-          <span class="sep">·</span>
-          <span class="num" title="${c.year == null ? "这个来源没有提供发行年份" : ""}">${c.year ?? '<span style="opacity:.6">年份 —</span>'}</span>
-          <span class="src"><i class="sq ${src.cls}"></i>${esc(src.name)}</span>
-        </span>
-      </div>
-      <div class="bar"><i class="${cls}" style="width:${Math.round(c.score * 100)}%"></i><u></u></div>
-    </div>`;
-  };
 }
 
 /** 底部操作区：按当前状态决定给用户什么动作 */
@@ -334,9 +319,4 @@ function actionArea(detail: TrackDetailDto): string {
         ${manual}
       </div>`;
   }
-}
-
-/** 空状态下把整个详情面板清空 */
-export function clearDetail(): void {
-  renderDetail(null);
 }

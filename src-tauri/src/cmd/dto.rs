@@ -7,9 +7,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::candidate::{Candidate, ProviderId};
-use crate::domain::plan::MatchResult;
+use crate::domain::lyrics::Lyrics;
 use crate::domain::track::Track;
-
+use crate::infra::config::Settings;
+use crate::pipeline::store::TrackStore;
 use crate::pipeline::writer;
 
 /// 列表行。刻意做得很小——1 万行时它决定了一次 IPC 的载荷量。
@@ -136,8 +137,6 @@ pub struct TrackDetailDto {
     /// 当前选中候选的来源（用于能力提示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// 这种格式能不能把歌词写进文件
-    pub can_write: bool,
     /// 元信息可信度过低，需要人工确认
     pub needs_review: bool,
 }
@@ -198,36 +197,33 @@ pub fn row(t: &Track) -> TrackRowDto {
 /// 失败与跳过的曲目在列表上必须留空，否则「0.55 分」这种被否决的候选看起来
 /// 就像已经配好了，用户点「保存歌词」时会以为这些也会被写进去。
 fn matched(t: &Track) -> Option<MatchedDto> {
-    t.displayable_match()?;
+    let m = t.displayable_match()?;
 
-    // 优先用候选列表 + 选择下标（能反映用户的挑选）
-    if let Some(c) = t.selected_candidate() {
-        return Some(MatchedDto {
-            provider: provider_key(c.provider),
-            provider_name: c.provider.display_name().to_string(),
-            score: match t.matched.as_ref() {
-                // 选中的就是匹配结果本身时，用它的置信度；否则用候选自己的评分
-                Some(m) if m.candidate.song_id == c.song_id => m.confidence.value(),
-                _ => c.score.total,
-            },
-            title: c.title.clone(),
-            artist: c.artist_joined(),
-            album: c.album.clone().unwrap_or_default(),
-            year: c.year,
-            duration: c.duration_ms.unwrap_or(0) / 1000,
-        });
-    }
     // 退化到匹配结果本身（重启后从索引恢复、还没有候选列表时）
-    t.matched.as_ref().map(|m| MatchedDto {
-        provider: provider_key(m.candidate.provider),
-        provider_name: m.candidate.provider.display_name().to_string(),
-        score: m.confidence.value(),
-        title: m.candidate.title.clone(),
-        artist: m.candidate.artist_joined(),
-        album: m.candidate.album.clone().unwrap_or_default(),
-        year: m.candidate.year,
-        duration: m.candidate.duration_ms.unwrap_or(0) / 1000,
-    })
+    let Some(c) = t.selected_candidate() else {
+        return Some(matched_dto(&m.candidate, m.confidence.value()));
+    };
+    // 优先用候选列表 + 选择下标（能反映用户的挑选）。
+    // 选中的就是匹配结果本身时，用匹配结果的 confidence；否则用候选自己的评分
+    let score = if m.candidate.song_id == c.song_id {
+        m.confidence.value()
+    } else {
+        c.score.total
+    };
+    Some(matched_dto(c, score))
+}
+
+fn matched_dto(c: &Candidate, score: f32) -> MatchedDto {
+    MatchedDto {
+        provider: provider_key(c.provider),
+        provider_name: c.provider.display_name().to_string(),
+        score,
+        title: c.title.clone(),
+        artist: c.artist_joined(),
+        album: c.album.clone().unwrap_or_default(),
+        year: c.year,
+        duration: c.duration_ms.unwrap_or(0) / 1000,
+    }
 }
 
 pub fn candidate(c: &Candidate) -> CandidateDto {
@@ -247,7 +243,7 @@ pub fn candidate(c: &Candidate) -> CandidateDto {
     }
 }
 
-pub fn detail(t: &Track, settings: &crate::infra::config::Settings) -> TrackDetailDto {
+pub fn detail(t: &Track, settings: &Settings) -> TrackDetailDto {
     let provider = t.provider();
     let capabilities = provider
         .map(crate::pipeline::downloader::capability_hint)
@@ -288,29 +284,22 @@ pub fn detail(t: &Track, settings: &crate::infra::config::Settings) -> TrackDeta
         // 这时给出预览等于告诉用户「歌词已经就绪」——而它其实不会被保存。
         preview: t
             .displayable_match()
-            .map(|m| preview(m, settings)),
+            .map(|m| preview_of(&m.lyrics, settings)),
         capabilities,
         provider: provider.map(|p| p.as_str().to_string()),
-        can_write: crate::tag::can_write(settings.lyrics.save_target, &t.path),
         needs_review: writer::needs_review(t),
     }
 }
 
-fn preview(m: &MatchResult, settings: &crate::infra::config::Settings) -> PreviewDto {
-    let merged = crate::lrc::merge::merge_translation(&m.lyrics.lines, &m.lyrics.trans);
-    let text = crate::lrc::render::render_lrc(
-        &merged,
-        &crate::lrc::render::RenderOptions {
-            one_line: crate::lrc::render::MERGE_TRANSLATION_ONE_LINE,
-            include_translation: settings.lyrics.include_translation,
-            strip_credits: false,
-        },
-    );
+/// 歌词预览。与写入共用同一条渲染路径（[`writer::render_lyrics`]），
+/// 用户在预览里看到的就是将要写进文件的内容。
+pub fn preview_of(lyrics: &Lyrics, settings: &Settings) -> PreviewDto {
+    let (merged, text) = writer::render_lyrics(lyrics, settings);
     PreviewDto {
         lines: merged.iter().filter(|l| !l.text.trim().is_empty()).count(),
         bytes: text.len(),
-        has_translation: m.lyrics.has_translation(),
-        has_verbatim: m.lyrics.has_verbatim(),
+        has_translation: lyrics.has_translation(),
+        has_verbatim: lyrics.has_verbatim(),
         text,
     }
 }
@@ -326,22 +315,32 @@ fn meta_source_label(s: crate::domain::track::MetaSource) -> &'static str {
 }
 
 pub fn stats(tracks: &[Track]) -> LibraryStats {
+    use crate::domain::track::TrackState as S;
     let mut s = LibraryStats { all: tracks.len(), ..Default::default() };
     for t in tracks {
         match t.state {
-            crate::domain::track::TrackState::Idle => s.idle += 1,
-            crate::domain::track::TrackState::Matched => s.matched += 1,
-            crate::domain::track::TrackState::Confirm => s.confirm += 1,
-            crate::domain::track::TrackState::Done => s.done += 1,
-            crate::domain::track::TrackState::Failed => s.failed += 1,
-            crate::domain::track::TrackState::Skip => s.skip += 1,
-            _ => {}
+            S::Idle => s.idle += 1,
+            S::Matched => s.matched += 1,
+            S::Confirm => s.confirm += 1,
+            S::Done => s.done += 1,
+            S::Failed => s.failed += 1,
+            S::Skip => s.skip += 1,
+            S::Matching | S::Writing => {}
         }
     }
     s.todo = s.matched + s.confirm;
     s.completed = s.done;
     s.problem = s.failed;
     s
+}
+
+/// 列表 + 计数（`list_tracks` 与 `snapshot` 共用）
+pub fn library(store: &TrackStore) -> LibraryDto {
+    LibraryDto {
+        root: store.root().to_string(),
+        tracks: store.all().iter().map(row).collect(),
+        stats: stats(store.all()),
+    }
 }
 
 /// 曲库扫描/恢复的返回
@@ -376,24 +375,11 @@ pub struct WritePlanDto {
     pub target: String,
 }
 
-/// 手动搜索的入参
-#[derive(Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchArgs {
-    pub track_id: u64,
-    /// 用户输入的关键词；为空时用曲目自己的标题 + 艺术家
-    #[serde(default)]
-    pub keyword: Option<String>,
-}
-
-/// 前端提交的设置（与 `Settings` 结构一致，只是走一次 DTO 边界）
-pub type SettingsDto = crate::infra::config::Settings;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::candidate::{Confidence, MatchScore};
-    use crate::domain::lyrics::Lyrics;
+    use crate::domain::plan::MatchResult;
     use crate::domain::track::{AudioFormat, LyricsPresence, TrackId, TrackMeta, TrackState};
     use std::path::PathBuf;
 

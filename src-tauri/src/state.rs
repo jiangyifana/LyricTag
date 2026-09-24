@@ -34,16 +34,6 @@ pub enum TaskKind {
     Write,
 }
 
-impl TaskKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TaskKind::Scan => "scan",
-            TaskKind::Match => "match",
-            TaskKind::Write => "write",
-        }
-    }
-}
-
 pub struct AppState {
     /// 用户设置。改动后立即持久化（弹窗与设置页共享同一份状态，§6.4 流程 D）
     pub settings: RwLock<Settings>,
@@ -53,7 +43,8 @@ pub struct AppState {
     pub gate: Arc<ProviderGate>,
     pub http: reqwest::Client,
     /// 进行中的任务表。任务历史**不持久化**（§4.5.4），只活在本次运行里。
-    tasks: Mutex<HashMap<u64, TaskHandle>>,
+    /// 每个任务结束时必须 [`AppState::finish_task`]，否则它会一直被当成「在途」。
+    tasks: Mutex<HashMap<u64, Arc<TaskHandle>>>,
     next_task_id: AtomicU64,
 }
 
@@ -115,11 +106,7 @@ impl AppState {
         self.tasks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id, TaskHandle {
-                id: handle.id,
-                kind: handle.kind,
-                cancel: handle.cancel.clone(),
-            });
+            .insert(id, handle.clone());
         handle
     }
 
@@ -143,24 +130,15 @@ impl AppState {
             },
             // 不带 id：停止所有在途任务（界面上只有一个「停止」按钮）
             None => {
-                let mut any = false;
                 for t in tasks.values() {
                     t.cancel.store(true, Ordering::Relaxed);
-                    any = true;
                 }
-                any
+                !tasks.is_empty()
             }
         }
     }
 
-    pub fn running_task_count(&self) -> usize {
-        self.tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
-    }
-
-    /// 把任务注册表里第一条在途任务的 id 暴露出去（状态栏显示用）
+    /// 全部在途任务的 id（前端用来确认状态栏可以复位）
     pub fn running_task_ids(&self) -> Vec<u64> {
         self.tasks
             .lock()

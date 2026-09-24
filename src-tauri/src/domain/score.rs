@@ -28,9 +28,6 @@ pub const DURATION_ZERO_SEC: f32 = 10.0;
 pub const AUTO_ACCEPT: f32 = 0.85;
 pub const NEED_REVIEW: f32 = 0.65;
 
-/// 每平台取回的候选数
-pub const SEARCH_DEPTH: usize = 10;
-
 /// 无时长信息时的中性值——既不奖励也不惩罚
 const NEUTRAL: f32 = 0.6;
 

@@ -1,7 +1,7 @@
 //! 编排层：扫描 → 匹配 → 下载 → 写入。
 //!
-//! 这一层只依赖 `provider::LyricsProvider` 与 `tag::TagWriter` 两个 trait，
-//! 不依赖任何具体平台或具体写入实现（DIP）。
+//! 这一层只依赖 `provider::LyricsProvider` trait，不依赖任何具体平台（DIP）；
+//! 写入统一经由 `tag::save` 落地。
 
 pub mod downloader;
 pub mod library;
@@ -13,6 +13,7 @@ pub mod store;
 pub mod writer;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -45,9 +46,16 @@ impl ProviderGate {
     }
 
     /// 取一个该平台的并发许可。任务被取消导致闸门关闭时返回 `None`。
-    pub async fn acquire(&self, id: ProviderId) -> Option<OwnedSemaphorePermit> {
-        let sem = self.semaphores.get(&id)?.clone();
-        sem.acquire_owned().await.ok()
+    ///
+    /// 返回的 future 不借用 `self`，可以整个 move 进 `tokio::spawn` 再等——
+    /// 这样各平台在**各自的任务里**排队。若在分发循环里逐个 await，
+    /// 某个平台排满就会卡住整个循环，其余平台明明有空位也发不出请求。
+    pub fn acquire(
+        &self,
+        id: ProviderId,
+    ) -> impl Future<Output = Option<OwnedSemaphorePermit>> + Send + 'static {
+        let sem = self.semaphores.get(&id).cloned();
+        async move { sem?.acquire_owned().await.ok() }
     }
 
     /// 当前可用的许可数（诊断用）
@@ -89,5 +97,18 @@ mod tests {
         assert_eq!(gate.available(ProviderId::QQ), 0);
         assert_eq!(gate.available(ProviderId::KuGou), 1);
         assert!(gate.acquire(ProviderId::KuGou).await.is_some());
+    }
+
+    /// 许可 future 不借用闸门，能整个 move 进任务里等：QQ 排满时，
+    /// 同一批分发出去的酷狗任务照常拿到许可，不会被排在前面的 QQ 挡住
+    #[tokio::test]
+    async fn waiting_on_one_source_does_not_hold_up_dispatch() {
+        let gate = ProviderGate::new(1);
+        let _qq = gate.acquire(ProviderId::QQ).await.unwrap();
+        let qq = tokio::spawn(gate.acquire(ProviderId::QQ));
+        let kugou = tokio::spawn(gate.acquire(ProviderId::KuGou));
+        assert!(kugou.await.unwrap().is_some());
+        assert!(!qq.is_finished(), "QQ 的许可还被占着，它必须继续等");
+        qq.abort();
     }
 }

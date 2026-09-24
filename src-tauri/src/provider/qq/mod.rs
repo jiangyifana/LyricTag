@@ -30,10 +30,6 @@ impl QqProvider {
         let limiter = Arc::new(crate::infra::ratelimit::per_source());
         Self { api: QqApi::new(http, limiter) }
     }
-
-    pub fn api(&self) -> &QqApi {
-        &self.api
-    }
 }
 
 #[async_trait]

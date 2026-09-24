@@ -16,6 +16,7 @@ import type {
 } from "./types.js";
 
 export type FilterKey = "all" | "todo" | "completed" | "problem";
+/** 可排序的列。必须与 `.thead .sortable[data-sort]` 的取值一致。 */
 export type SortKey = "title" | "artist" | "duration" | "state" | "score";
 
 export function emptyStats(): LibraryStats {
@@ -55,7 +56,6 @@ export const S = {
   detail: null as TrackDetailDto | null,
   /** 实际生效的主题（`system` 已经解析成 light/dark） */
   theme: "light" as "light" | "dark",
-  running: false,
   cacheBytes: 0,
 };
 
@@ -73,7 +73,6 @@ export function applySnapshot(snap: SnapshotDto): void {
   S.stats = snap.library.stats;
   S.settings = snap.settings;
   S.cacheBytes = snap.cacheBytes;
-  S.running = snap.running.length > 0;
 
   // 选中项还在就直接保留，否则退到第一行
   if (S.selectedId !== null && !S.rows.some((r) => r.id === S.selectedId)) {
@@ -105,60 +104,108 @@ export async function planWrite(trackIds: number[]): Promise<WritePlanDto> {
 
 // ── 本地过滤 / 排序 ──────────────────────────────────────────────────────
 
-export function visibleRows(): TrackRowDto[] {
-  let list = S.rows;
+/** 排序用的比较器，全局只建一个。`localeCompare(…, "zh")` 每次调用都要按 locale
+ *  重新准备排序规则，万行排序时这部分开销会直接变成滚动卡顿。两者的排序结果相同。 */
+const collator = new Intl.Collator("zh");
 
-  switch (S.filter) {
+function inFilter(r: TrackRowDto, filter: FilterKey): boolean {
+  switch (filter) {
+    // 「待处理」= 已匹配 + 待确认（失败单列为「未找到歌词」，§9.6 缺陷修复 5）
     case "todo":
-      // 「待处理」= 已匹配 + 待确认（失败单列为「未找到歌词」，§9.6 缺陷修复 5）
-      list = list.filter((r) => r.state === "matched" || r.state === "confirm");
-      break;
+      return r.state === "matched" || r.state === "confirm";
     case "completed":
-      list = list.filter((r) => r.state === "done");
-      break;
+      return r.state === "done";
     case "problem":
-      list = list.filter((r) => r.state === "failed");
-      break;
+      return r.state === "failed";
     default:
-      break;
+      return true;
+  }
+}
+
+/** `q` 须已 trim + 小写 */
+function matchesQuery(r: TrackRowDto, q: string): boolean {
+  return !q || `${r.title} ${r.artist} ${r.matched?.album ?? ""}`.toLowerCase().includes(q);
+}
+
+/** 这一行在当前智能视图 + 搜索条件下是否可见（与 {@link visibleRows} 同一条规则） */
+export function isRowVisible(r: TrackRowDto): boolean {
+  return inFilter(r, S.filter) && matchesQuery(r, S.query.trim().toLowerCase());
+}
+
+function compareRows(key: SortKey, dir: 1 | -1): (a: TrackRowDto, b: TrackRowDto) => number {
+  return (a, b) => {
+    let x: string | number;
+    let y: string | number;
+    switch (key) {
+      case "state":
+        x = a.stateLabel;
+        y = b.stateLabel;
+        break;
+      case "score":
+        x = a.matched?.score ?? -1;
+        y = b.matched?.score ?? -1;
+        break;
+      case "duration":
+        x = a.duration;
+        y = b.duration;
+        break;
+      default:
+        x = (a[key] ?? "") as string;
+        y = (b[key] ?? "") as string;
+    }
+    if (typeof x === "string" || typeof y === "string") {
+      return collator.compare(String(x), String(y)) * dir;
+    }
+    return (x - y) * dir;
+  };
+}
+
+/** 上一次 {@link visibleRows} 的输入与结果 */
+let memo: {
+  rows: TrackRowDto[];
+  filter: FilterKey;
+  query: string;
+  sortKey: SortKey | null;
+  sortDir: 1 | -1;
+  list: TrackRowDto[];
+} | null = null;
+
+/** 行对象被就地修改之后调用（例如 `track:updated`），让下一次 visibleRows 重新计算。
+ *  整体替换 `S.rows`、改筛选 / 搜索 / 排序都不必调它——那些会被自动识别。 */
+export function invalidateRows(): void {
+  memo = null;
+}
+
+/**
+ * 当前视图下的行（筛选 + 搜索 + 排序）。
+ *
+ * 虚拟滚动每一帧都要取它，一次渲染里也会被取好几次，因此按输入记忆结果：
+ * 输入不变时直接返回上一次的数组，不再对上万行重复过滤、排序。
+ */
+export function visibleRows(): TrackRowDto[] {
+  if (
+    memo &&
+    memo.rows === S.rows &&
+    memo.filter === S.filter &&
+    memo.query === S.query &&
+    memo.sortKey === S.sort.key &&
+    memo.sortDir === S.sort.dir
+  ) {
+    return memo.list;
   }
 
   const q = S.query.trim().toLowerCase();
-  if (q) {
-    list = list.filter((r) =>
-      `${r.title} ${r.artist} ${r.matched?.album ?? ""}`.toLowerCase().includes(q),
-    );
-  }
+  let list =
+    S.filter === "all" && !q ? S.rows : S.rows.filter((r) => inFilter(r, S.filter) && matchesQuery(r, q));
+  if (S.sort.key) list = [...list].sort(compareRows(S.sort.key, S.sort.dir));
 
-  if (S.sort.key) {
-    const key = S.sort.key;
-    const dir = S.sort.dir;
-    list = [...list].sort((a, b) => {
-      let x: string | number;
-      let y: string | number;
-      switch (key) {
-        case "state":
-          x = a.stateLabel;
-          y = b.stateLabel;
-          break;
-        case "score":
-          x = a.matched?.score ?? -1;
-          y = b.matched?.score ?? -1;
-          break;
-        case "duration":
-          x = a.duration;
-          y = b.duration;
-          break;
-        default:
-          x = (a[key] ?? "") as string;
-          y = (b[key] ?? "") as string;
-      }
-      if (typeof x === "string" || typeof y === "string") {
-        return String(x).localeCompare(String(y), "zh") * dir;
-      }
-      return (x - y) * dir;
-    });
-  }
-
+  memo = {
+    rows: S.rows,
+    filter: S.filter,
+    query: S.query,
+    sortKey: S.sort.key,
+    sortDir: S.sort.dir,
+    list,
+  };
   return list;
 }

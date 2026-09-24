@@ -2,13 +2,20 @@
  * 三个弹窗：保存确认（流程 D）、手动搜索（流程 C）、完成报告（§6.5.3）。
  */
 
-import { esc, fmtDur, fmtSize, must, mustInput, renderLrc, SRC_META, scoreClass, toast } from "../dom.js";
+import { candidateCardHtml, esc, fmtSize, must, mustInput, renderLrc, toast } from "../dom.js";
 import { S, planWrite, saveSettings } from "../store.js";
 import { invoke } from "../tauri.js";
-import type { CandidateDto, MatchReport, Settings, WritePlanDto, WriteReport } from "../types.js";
+import type {
+  CandidateDto,
+  MatchReport,
+  PreviewDto,
+  Settings,
+  WritePlanDto,
+  WriteReport,
+} from "../types.js";
 
 /** 设置开关的键 ↔ 设置对象的路径。弹窗与设置页共用同一份状态（§6.4）。 */
-type SettingKey =
+export type SettingKey =
   | "save_target"
   | "include_translation"
   | "overwrite_existing"
@@ -249,31 +256,7 @@ function renderManualList(): void {
   }
 
   must("#manualList").innerHTML = manualCandidates
-    .map((c, i) => {
-      const src = SRC_META[c.provider] ?? { name: c.provider, cls: "netease" };
-      const cls = scoreClass(c.score);
-      return `<div class="cand" data-cand="${i}">
-        <div class="cand-h">
-          <span class="rk">${i + 1}</span>
-          <span class="ti trunc">${esc(c.title)}</span>
-          <span class="sc ${cls}">${c.score.toFixed(2)}</span>
-        </div>
-        <div class="cand-b">
-          <span class="cb-left">
-            <span class="nowrap">${esc(c.artist) || "—"}</span>
-            <span class="sep">·</span>
-            <span class="trunc album" title="${esc(c.album || "专辑未填")}">${esc(c.album || "专辑未填")}</span>
-          </span>
-          <span class="cb-right">
-            <span class="num">${fmtDur(c.duration)}</span>
-            <span class="sep">·</span>
-            <span class="num">${c.year ?? '<span style="opacity:.6">年份 —</span>'}</span>
-            <span class="src"><i class="sq ${src.cls}"></i>${esc(src.name)}</span>
-          </span>
-        </div>
-        <div class="bar"><i class="${cls}" style="width:${Math.round(c.score * 100)}%"></i><u></u></div>
-      </div>`;
-    })
+    .map((c, i) => candidateCardHtml(c, i, { on: false, pickable: true }))
     .join("");
 }
 
@@ -295,10 +278,7 @@ async function selectManualCandidate(index: number): Promise<void> {
   must("#manualPreview").innerHTML = '<div style="font-size:11.5px;color:var(--text-3)">正在获取歌词…</div>';
 
   try {
-    const preview = await invoke<{ text: string; lines: number; bytes: number }>(
-      "preview_candidate",
-      { candidate: cand },
-    );
+    const preview = await invoke<PreviewDto>("preview_candidate", { candidate: cand });
     must("#manualPreview").innerHTML = `
       <div class="dsec-t">歌词预览 <div class="grow"></div>
         <span style="text-transform:none;font-size:10.5px;letter-spacing:0">${preview.lines} 行 · ${fmtSize(preview.bytes)}</span>

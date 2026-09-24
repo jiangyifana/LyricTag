@@ -12,19 +12,14 @@ use super::error::{AppError, Result};
 use super::paths;
 
 /// 歌词保存方式（§4.4.1）。这是唯一一个用户可见的「写入策略」选择。
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SaveTarget {
     /// 默认：歌词写进歌曲文件内部，换播放器/换电脑都跟着走
+    #[default]
     File,
     /// 另存为与歌曲同名的 .lrc 文件，完全不碰音频文件
     Sidecar,
-}
-
-impl Default for SaveTarget {
-    fn default() -> Self {
-        SaveTarget::File
-    }
 }
 
 impl SaveTarget {
@@ -37,18 +32,13 @@ impl SaveTarget {
 }
 
 /// 主题（设置页「外观」组）
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
+    #[default]
     System,
     Light,
     Dark,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Theme::System
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -197,16 +187,22 @@ fn same_path(a: &str, b: &str) -> bool {
 }
 
 /// 临时文件 + 原子替换。用于配置文件与曲库索引。
+///
+/// `std::fs::rename` 在 Windows 上会直接替换已存在的目标（`MOVEFILE_REPLACE_EXISTING`
+/// 语义），因此**不要先删目标**：删与改名之间会留出一个「文件不存在」的窗口，
+/// 崩溃在这里就丢了整份设置或曲库状态。
+///
+/// 临时文件名是固定的（`<目标>.tmp`），两个任务前后脚结束、同时落盘时会互相踩坏它，
+/// 所以整个过程串行化。这里的写入都很少也很快，一把全局锁足够。
 pub fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
     let tmp = target.with_extension("tmp");
     std::fs::write(&tmp, bytes).map_err(AppError::Io)?;
-    // Windows 上 rename 到已存在的路径会失败，先移除目标
-    if target.exists() {
-        let _ = std::fs::remove_file(target);
-    }
     std::fs::rename(&tmp, target).map_err(AppError::Io)?;
     Ok(())
 }
@@ -290,5 +286,20 @@ mod tests {
     fn dedup_paths_respects_the_cap() {
         let raw: Vec<String> = (0..MAX_RECENT_PATHS + 3).map(|i| format!("D:/M{i}")).collect();
         assert_eq!(dedup_paths(&raw).len(), MAX_RECENT_PATHS);
+    }
+
+    /// 目标已存在时直接原子替换——这正是去掉「先删目标」那一步的前提
+    #[test]
+    fn write_atomic_replaces_an_existing_file() {
+        let dir = std::env::temp_dir().join("lyrictag_write_atomic");
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = dir.join("config.toml");
+
+        write_atomic(&target, b"old").unwrap();
+        write_atomic(&target, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!target.with_extension("tmp").exists(), "临时文件不该残留");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

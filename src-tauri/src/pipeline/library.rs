@@ -16,6 +16,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use crate::domain::candidate::ProviderId;
 use crate::domain::lyrics::Lyrics;
@@ -24,6 +25,8 @@ use crate::domain::track::{AudioFormat, LyricsPresence, TrackMeta, TrackState};
 use crate::infra::config::write_atomic;
 use crate::infra::error::{AppError, Result};
 use crate::infra::paths;
+
+use super::store::TrackStore;
 
 /// 歌词缓存容量上限（§4.6.2 内部常量）
 pub const CACHE_MAX_MB: u64 = 128;
@@ -73,13 +76,27 @@ impl LibraryIndex {
 }
 
 /// 写入曲库索引。原子替换，避免中途崩溃留下半个文件。
-pub fn save_index(index: &LibraryIndex) -> Result<()> {
-    let mut index = index.clone();
+///
+/// 按值接收：索引可能有上万条记录，这里本来就是它的最后一站，没必要再克隆一份。
+pub fn save_index(mut index: LibraryIndex) -> Result<()> {
     index.saved_at = now_string();
     index.version = INDEX_VERSION;
     let text = serde_json::to_string(&index)
         .map_err(|e| AppError::Other(format!("曲库索引序列化失败：{e}")))?;
     write_atomic(&paths::library_index_path(), text.as_bytes())
+}
+
+/// 把曲库当前状态落盘（§4.5.4）。每个任务结束时各调一次，比「退出时存一次」更抗崩溃。
+///
+/// 序列化与写文件放到阻塞线程池：万首曲库的索引有几 MB，不该占着异步工作线程。
+/// 失败只记日志——落盘失败不该让一次已经成功的任务变成失败。
+pub async fn persist(store: &RwLock<TrackStore>, context: &str) {
+    let index = store.read().await.to_index();
+    match tokio::task::spawn_blocking(move || save_index(index)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("{context}保存曲库索引失败：{e}"),
+        Err(e) => tracing::warn!("{context}保存曲库索引异常：{e}"),
+    }
 }
 
 /// 读取曲库索引。文件不存在或版本不符时返回 `None`（不报错，静默从头开始）。
@@ -92,12 +109,10 @@ pub fn load_index() -> Option<LibraryIndex> {
 // ── 歌词缓存 ─────────────────────────────────────────────────────────────
 
 fn cache_file(provider: ProviderId, song_id: &str) -> PathBuf {
-    // 平台歌曲 ID 可能含 `/`、`:` 等非法文件名字符，用哈希做文件名更稳妥
-    let digest = blake3::hash(format!("{provider}:{song_id}").as_bytes());
-    let name: String = digest.as_bytes()[..12]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    // 平台歌曲 ID 可能含 `/`、`:` 等非法文件名字符，用哈希做文件名更稳妥。
+    // 取前 12 字节（24 个十六进制字符）——与既有缓存文件名保持一致。
+    let hex = blake3::hash(format!("{provider}:{song_id}").as_bytes()).to_hex();
+    let name = &hex[..24];
     paths::cache_dir()
         .join("lyrics")
         .join(format!("{provider}-{name}.json"))
@@ -131,7 +146,7 @@ pub fn load_cached_lyrics(provider: ProviderId, song_id: &str) -> Option<Lyrics>
     serde_json::from_slice::<Lyrics>(&bytes).ok()
 }
 
-/// 缓存超限时的清理：按修改时间从旧到新删，直到降到上限以下。
+/// 缓存超限时的清理：按修改时间从旧到新删，直到降到上限以下。返回本次释放的字节数。
 pub fn enforce_cache_limit() -> u64 {
     let max_bytes = CACHE_MAX_MB * 1024 * 1024;
     let dir = paths::cache_dir().join("lyrics");
@@ -147,7 +162,8 @@ pub fn enforce_cache_limit() -> u64 {
 
     let mut total: u64 = files.iter().map(|(_, len, _)| *len).sum();
     if total <= max_bytes {
-        return total;
+        // 没超限就什么都没删。这里曾经返回 `total`，退出日志因此每次都谎报「清理了 N 字节」
+        return 0;
     }
 
     files.sort_by_key(|(t, _, _)| *t);
@@ -165,13 +181,27 @@ pub fn enforce_cache_limit() -> u64 {
     freed
 }
 
-/// 缓存里的歌词文件数（设置页显示用）
-pub fn cache_entry_count() -> usize {
-    walkdir::WalkDir::new(paths::cache_dir().join("lyrics"))
+/// 缓存占用：`(总字节数, 歌词条目数)`（设置页显示用）。
+///
+/// 一次遍历同时算出两个数：快照在每个任务结束、每次确认候选之后都会取一次，
+/// 缓存目录里可能躺着上万个文件，没必要为两个数字走两遍。
+pub fn cache_stats() -> (u64, usize) {
+    let lyrics_dir = paths::cache_dir().join("lyrics");
+    let mut bytes = 0u64;
+    let mut entries = 0usize;
+    for e in walkdir::WalkDir::new(paths::cache_dir())
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .count()
+    {
+        if let Ok(meta) = e.metadata() {
+            bytes += meta.len();
+        }
+        if e.path().starts_with(&lyrics_dir) {
+            entries += 1;
+        }
+    }
+    (bytes, entries)
 }
 
 fn now_string() -> String {
@@ -209,6 +239,16 @@ mod tests {
         let c = cache_file(ProviderId::QQ, "2");
         assert_ne!(a, b);
         assert_ne!(a, c);
+    }
+
+    /// 缓存文件名的规则不能变：变了等于把用户现有的歌词缓存全部作废，
+    /// 重开软件后「已匹配」的曲目会因为找不回缓存的歌词而统统降级成「未处理」。
+    #[test]
+    fn cache_file_name_is_stable() {
+        let digest = blake3::hash(b"qq:1");
+        let legacy: String = digest.as_bytes()[..12].iter().map(|b| format!("{b:02x}")).collect();
+        let p = cache_file(ProviderId::QQ, "1");
+        assert_eq!(p.file_name().unwrap().to_string_lossy(), format!("qq-{legacy}.json"));
     }
 
     /// 含路径分隔符的歌曲 ID 不能逃出缓存目录

@@ -58,10 +58,11 @@ pub async fn search_all(
         let provider: Arc<dyn LyricsProvider> = provider.clone();
         let query = query.clone();
 
-        // 每平台独立并发闸门（§4.5.3）
-        let permit = gate.acquire(provider.id()).await;
+        // 每平台独立并发闸门（§4.5.3）。许可在任务**内部**等：
+        // 在这个循环里 await 的话，某个平台排满就会卡住后面所有平台的检索
+        let permit = gate.acquire(provider.id());
         handles.push(tokio::spawn(async move {
-            let _permit = permit;
+            let _permit = permit.await;
             let id = provider.id();
             let result = provider.search(&query, SEARCH_DEPTH).await;
             (id, result)
@@ -163,11 +164,7 @@ pub fn manual_query(track: &crate::domain::track::Track, keyword: Option<&str>) 
             artist: String::new(),
             duration_secs: track.duration_secs().map(|s| s as u32),
         },
-        None => SearchQuery {
-            title: track.meta.display_title(),
-            artist: track.meta.display_artist(),
-            duration_secs: track.duration_secs().map(|s| s as u32),
-        },
+        None => SearchQuery::from_track(track),
     }
 }
 

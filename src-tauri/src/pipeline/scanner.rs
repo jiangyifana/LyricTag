@@ -5,12 +5,13 @@
 //!
 //! 扫描是可中断的：取消标志在每个文件处理前检查一次。
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 use crate::domain::track::{AudioFormat, LyricsPresence, Track, TrackId, TrackMeta, TrackState};
 use crate::infra::error::{AppError, Result};
@@ -45,7 +46,7 @@ where
     let paths: Vec<PathBuf> = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| e.depth() == 0 || !is_ignored(e.path()))
+        .filter_entry(|e| e.depth() == 0 || !is_ignored(e))
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .map(|e| e.into_path())
@@ -111,10 +112,6 @@ pub fn build_track(path: &Path, root: Option<&Path>) -> Result<Track> {
         ..extracted.meta
     };
 
-    let format = probed
-        .format
-        .unwrap_or_else(|| format_from_path(path));
-
     let sidecar = tag::writer_lofty::sidecar_path_for(path);
     let has_sidecar = sidecar.is_file() && has_content(&sidecar);
     let presence = match (has_sidecar, probed.has_embedded_lyrics) {
@@ -129,7 +126,7 @@ pub fn build_track(path: &Path, root: Option<&Path>) -> Result<Track> {
     Ok(Track {
         id: TrackId::from_path(path),
         path: path.to_path_buf(),
-        format,
+        format: probed.format,
         duration_ms: probed.duration_ms,
         file_size,
         meta,
@@ -144,42 +141,33 @@ pub fn build_track(path: &Path, root: Option<&Path>) -> Result<Track> {
     })
 }
 
-/// 重新探测单个文件（用户改了标签之后刷新一行）
-pub fn rescan_track(path: &Path, root: Option<&Path>) -> Result<Track> {
-    build_track(path, root)
-}
-
-fn format_from_path(path: &Path) -> AudioFormat {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(AudioFormat::from_extension)
-        .unwrap_or(AudioFormat::Unknown)
-}
-
 /// 应当跳过的目录/文件。
 ///
 /// 两种情况都要跳过：以 `.` 开头的（Unix 习惯），以及带了 Windows
 /// 「隐藏」属性的（典型例子是 `System Volume Information`——扫它只会产生一堆
 /// 无权限错误）。
-fn is_ignored(path: &Path) -> bool {
-    if path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with('.'))
-    {
+fn is_ignored(entry: &DirEntry) -> bool {
+    if is_dot_name(entry.file_name()) {
         return true;
     }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-        if let Ok(meta) = std::fs::metadata(path) {
-            if meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0 {
-                return true;
-            }
+        // 用遍历时已经拿到的元数据：Windows 上它直接来自目录枚举（FindNextFileW），
+        // 不必像 `std::fs::metadata` 那样为每个条目再打开一次文件
+        if entry
+            .metadata()
+            .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+        {
+            return true;
         }
     }
     false
+}
+
+fn is_dot_name(name: &OsStr) -> bool {
+    name.to_str().is_some_and(|n| n.starts_with('.'))
 }
 
 fn has_content(lrc_path: &Path) -> bool {
@@ -232,8 +220,8 @@ mod tests {
 
     #[test]
     fn hidden_directories_are_skipped() {
-        assert!(is_ignored(Path::new("D:/x/.git")));
-        assert!(!is_ignored(Path::new("D:/x/Music")));
+        assert!(is_dot_name(OsStr::new(".git")));
+        assert!(!is_dot_name(OsStr::new("Music")));
     }
 
     /// 回归：`filter_entry` 对根目录本身也生效，扫描以 `.` 开头的目录时必须仍然有效
@@ -265,12 +253,5 @@ mod tests {
         assert_eq!(out.skipped, 1, "隐藏子目录里的文件不该被扫描到");
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn format_from_path_covers_common_extensions() {
-        assert_eq!(format_from_path(Path::new("a.mp3")), AudioFormat::Mp3);
-        assert_eq!(format_from_path(Path::new("a.M4A")), AudioFormat::M4a);
-        assert_eq!(format_from_path(Path::new("a.xyz")), AudioFormat::Unknown);
     }
 }

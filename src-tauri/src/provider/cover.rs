@@ -32,7 +32,11 @@ pub async fn fetch(http: &reqwest::Client, url: &str) -> Result<CoverBytes> {
     if bytes.len() > MAX_COVER_BYTES {
         return Err(AppError::BadResponse("封面图片过大".into()));
     }
-    normalize(bytes.to_vec())
+    // 解码、缩放、重编码都是纯 CPU 活（大图缩放能到几百毫秒），
+    // 放到阻塞线程池里做，别占着异步工作线程
+    tokio::task::spawn_blocking(move || normalize(bytes.to_vec()))
+        .await
+        .map_err(|e| AppError::Other(format!("封面处理异常：{e}")))?
 }
 
 /// 校验并归一化封面字节。

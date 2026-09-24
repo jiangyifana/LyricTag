@@ -3,7 +3,13 @@
 import { fmtSize, must, toast } from "../dom.js";
 import { S, saveSettings } from "../store.js";
 import { invoke } from "../tauri.js";
-import { readSetting, syncPlanDialog, writeSetting } from "../ui/dialogs.js";
+import {
+  errorText,
+  readSetting,
+  syncPlanDialog,
+  writeSetting,
+  type SettingKey,
+} from "../ui/dialogs.js";
 
 /** 设置开关 → 中文说明。开关本身只有「开/关」两个状态，含义靠描述传达。 */
 const SWITCH_LABELS: Record<string, string> = {
@@ -41,10 +47,10 @@ export function initSettings(): void {
   document.querySelectorAll<HTMLElement>(".sw[data-key]").forEach((sw) => {
     sw.addEventListener("click", () => {
       void (async () => {
-        const key = sw.dataset.key!;
-        const now = readSetting(key as Parameters<typeof readSetting>[0]);
+        const key = sw.dataset.key as SettingKey;
+        const now = readSetting(key);
         const nextValue = typeof now === "boolean" ? !now : true;
-        await writeSetting(key as Parameters<typeof writeSetting>[0], nextValue);
+        await writeSetting(key, nextValue);
         syncSettings();
         syncPlanDialog();
         // 设置变了，详情面板里「保存到哪儿」这类文案也要跟着变
@@ -61,7 +67,7 @@ export function initSettings(): void {
         syncSettings();
         toast(freed > 0 ? `已清空歌词缓存，释放 ${fmtSize(freed)}` : "歌词缓存已经是空的");
       } catch (e) {
-        toast(typeof e === "string" ? e : String(e));
+        toast(errorText(e));
       }
     })();
   });
@@ -83,8 +89,8 @@ export function syncSettings(): void {
       : "在歌曲旁边生成一个同名的 .lrc 文件，不改动原文件";
 
   document.querySelectorAll<HTMLElement>(".sw[data-key]").forEach((sw) => {
-    const key = sw.dataset.key!;
-    sw.classList.toggle("on", readSetting(key as Parameters<typeof readSetting>[0]) === true);
+    const key = sw.dataset.key as SettingKey;
+    sw.classList.toggle("on", readSetting(key) === true);
     if (SWITCH_LABELS[key]) sw.title = SWITCH_LABELS[key];
   });
 

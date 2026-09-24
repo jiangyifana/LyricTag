@@ -8,6 +8,7 @@
 //! 本模块通过 [`EventSink`] 与界面通信，**不依赖 tauri**，
 //! 因此可以脱离 GUI 做端到端测试。
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -146,9 +147,10 @@ pub async fn check_sources(registry: &ProviderRegistry, gate: &ProviderGate) -> 
     let mut handles = Vec::new();
     for provider in registry.all() {
         let provider = provider.clone();
-        let permit = gate.acquire(provider.id()).await;
+        // 许可在任务内部等，理由同 `matcher::search_all`：不让一个平台卡住其余平台
+        let permit = gate.acquire(provider.id());
         handles.push(tokio::spawn(async move {
-            let _permit = permit;
+            let _permit = permit.await;
             let id = provider.id();
             let query = SearchQuery {
                 title: "test".into(),
@@ -217,12 +219,14 @@ pub async fn run_match(
     let cursor = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicUsize::new(0));
     let throttle = Arc::new(Throttle::new());
+    // 各 worker 共享同一份队列；以前每个 worker 各克隆一整份
+    let targets = Arc::new(targets);
 
     let mut handles = Vec::with_capacity(MATCH_CONCURRENCY);
     for _ in 0..MATCH_CONCURRENCY {
         let ctx = ctx.clone();
         let sink = sink.clone();
-        let targets = Arc::new(targets.clone());
+        let targets = targets.clone();
         let cursor = cursor.clone();
         let done = done.clone();
         let throttle = throttle.clone();
@@ -239,9 +243,10 @@ pub async fn run_match(
                     break;
                 }
                 let (id, query) = &targets[i];
+                let id = *id;
 
-                set_state(&ctx, *id, TrackState::Matching, None).await;
-                emit_track(&ctx, sink.as_ref(), *id).await;
+                set_state(&ctx, id, TrackState::Matching, None).await;
+                emit_track(&ctx, sink.as_ref(), id).await;
 
                 match process_one(&ctx, id, query).await {
                     OneOutcome::Matched => local.matched += 1,
@@ -251,7 +256,7 @@ pub async fn run_match(
                 }
 
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                emit_track(&ctx, sink.as_ref(), *id).await;
+                emit_track(&ctx, sink.as_ref(), id).await;
                 if throttle.allow() || n == targets.len() {
                     let (ok, warn, err, skip) = count_states(&ctx).await;
                     sink.progress(ProgressEvent::Progress {
@@ -300,12 +305,12 @@ enum OneOutcome {
 }
 
 /// 处理单曲：检索 → 评分 → 取词 → 落状态。
-async fn process_one(ctx: &TaskCtx, id: &u64, query: &SearchQuery) -> OneOutcome {
+async fn process_one(ctx: &TaskCtx, id: u64, query: &SearchQuery) -> OneOutcome {
     let outcome = matcher::search_all(&ctx.registry, &ctx.gate, query).await;
     let mut shortlist = matcher::shortlist(&outcome.candidates);
 
     if shortlist.is_empty() {
-        set_state(ctx, *id, TrackState::Failed, Some("没有找到歌词，可以试试手动搜索".into())).await;
+        set_state(ctx, id, TrackState::Failed, Some("没有找到歌词，可以试试手动搜索".into())).await;
         return OneOutcome::Failed;
     }
 
@@ -315,11 +320,11 @@ async fn process_one(ctx: &TaskCtx, id: &u64, query: &SearchQuery) -> OneOutcome
 
     match downloader::fetch_lyrics(&ctx.registry, &ctx.gate, &best).await {
         Ok(lyrics) if lyrics.is_instrumental => {
-            set_state(ctx, *id, TrackState::Skip, Some("纯音乐，无需歌词".into())).await;
+            set_state(ctx, id, TrackState::Skip, Some("纯音乐，无需歌词".into())).await;
             OneOutcome::Skipped
         }
         Ok(lyrics) if !lyrics.has_content() => {
-            set_state(ctx, *id, TrackState::Failed, Some("这个来源没有可用的歌词".into())).await;
+            set_state(ctx, id, TrackState::Failed, Some("这个来源没有可用的歌词".into())).await;
             OneOutcome::Failed
         }
         Ok(lyrics) => {
@@ -339,8 +344,8 @@ async fn process_one(ctx: &TaskCtx, id: &u64, query: &SearchQuery) -> OneOutcome
             };
             {
                 let mut store = ctx.store.write().await;
-                store.apply_match(*id, result, shortlist);
-                store.set_state(*id, confidence.state(), message);
+                store.apply_match(id, result, shortlist);
+                store.set_state(id, confidence.state(), message);
             }
             match confidence {
                 Confidence::Auto(_) => OneOutcome::Matched,
@@ -349,7 +354,7 @@ async fn process_one(ctx: &TaskCtx, id: &u64, query: &SearchQuery) -> OneOutcome
             }
         }
         Err(e) => {
-            set_state(ctx, *id, TrackState::Failed, Some(e.user_message())).await;
+            set_state(ctx, id, TrackState::Failed, Some(e.user_message())).await;
             OneOutcome::Failed
         }
     }
@@ -373,37 +378,38 @@ pub async fn run_write(
     };
 
     // ── 计划阶段：所有会导致跳过的原因都在动文件之前算出来 ──
-    let (all_targets, plan) = {
+    let all_targets: Vec<Track> = {
         let store = ctx.store.read().await;
-        let tracks: Vec<Track> = ids.iter().filter_map(|id| store.get(*id)).cloned().collect();
-        let plan = writer::plan(&tracks, target, &settings);
-        (tracks, plan)
+        ids.iter().filter_map(|id| store.get(*id)).cloned().collect()
     };
+    // 计划要逐首探测格式与文件占用（同步文件 IO），拿到快照后就放掉曲库读锁
+    let plan = writer::plan(&all_targets, target, &settings);
 
     for item in &plan.items {
         // 跳过的原因要对用户说得出来——弹窗与日志都按这个文案展示
-        let reason = match item.action {
-            WriteAction::SkipLocked => Some("这个文件正被其他程序使用，已跳过"),
-            WriteAction::SkipExistingLyrics => Some("歌曲里已经有歌词，按你的设置跳过"),
-            WriteAction::SkipUnsupportedFormat => Some("这种格式不支持保存歌词，已跳过"),
-            WriteAction::SkipNoMatch => Some("还没有匹配到歌词，先点「开始匹配」"),
-            _ => None,
-        };
-        let Some(msg) = reason else { continue };
-
-        match item.action {
+        let msg = match item.action {
+            WriteAction::Write | WriteAction::WriteSidecarOnly => continue,
             WriteAction::SkipLocked => {
                 report.locked += 1;
                 report.failures.push(FailureItem {
                     title: item.title.clone(),
                     reason: "正被其他程序使用".into(),
                 });
+                "这个文件正被其他程序使用，已跳过"
             }
-            WriteAction::SkipExistingLyrics => report.skipped_existing += 1,
-            WriteAction::SkipUnsupportedFormat => report.skipped_unsupported += 1,
-            WriteAction::SkipNoMatch => report.skipped_no_match += 1,
-            _ => {}
-        }
+            WriteAction::SkipExistingLyrics => {
+                report.skipped_existing += 1;
+                "歌曲里已经有歌词，按你的设置跳过"
+            }
+            WriteAction::SkipUnsupportedFormat => {
+                report.skipped_unsupported += 1;
+                "这种格式不支持保存歌词，已跳过"
+            }
+            WriteAction::SkipNoMatch => {
+                report.skipped_no_match += 1;
+                "还没有匹配到歌词，先点「开始匹配」"
+            }
+        };
         report.skipped += 1;
         set_state(&ctx, item.track_id, TrackState::Skip, Some(msg.to_string())).await;
         sink.log(LogEvent {
@@ -413,7 +419,7 @@ pub async fn run_write(
         emit_track(&ctx, sink.as_ref(), item.track_id).await;
     }
 
-    let writable: Vec<u64> = plan
+    let writable: HashSet<u64> = plan
         .items
         .iter()
         .filter(|i| i.action.is_write())
@@ -516,7 +522,7 @@ async fn write_one(
     ctx: &TaskCtx,
     track: &Track,
     target: SaveTarget,
-    settings: &Settings,
+    settings: &Arc<Settings>,
     local: &mut WriteReport,
     sink: &dyn EventSink,
 ) {
@@ -537,9 +543,9 @@ async fn write_one(
         _ => None,
     };
 
-    // lofty 是同步 IO，放到阻塞线程池（§4.5.3）
+    // lofty 是同步 IO，放到阻塞线程池（§4.5.3）。设置是 Arc，克隆只加引用计数
     let track_owned = track.clone();
-    let settings_owned = settings.clone();
+    let settings_owned = Arc::clone(settings);
     let joined = tokio::task::spawn_blocking(move || {
         writer::execute(&track_owned, target, &settings_owned, cover_bytes)
     })
@@ -599,17 +605,7 @@ async fn collect_targets(ctx: &TaskCtx, ids: &[u64]) -> Vec<(u64, SearchQuery)> 
         .filter_map(|id| {
             let t = store.get(*id)?;
             // 已经写好的曲目不再重复匹配
-            if t.state == TrackState::Done {
-                return None;
-            }
-            Some((
-                *id,
-                SearchQuery {
-                    title: t.meta.display_title(),
-                    artist: t.meta.display_artist(),
-                    duration_secs: t.duration_secs().map(|s| s as u32),
-                },
-            ))
+            (t.state != TrackState::Done).then(|| (*id, SearchQuery::from_track(t)))
         })
         .collect()
 }

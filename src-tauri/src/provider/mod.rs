@@ -51,11 +51,6 @@ pub trait LyricsProvider: Send + Sync {
     /// 入参是完整的 [`Candidate`] 而不是裸 `song_id`：酷狗的取词链路需要
     /// **id 与 accesskey 两个值**（§4.3.3 三步链路），只传 id 拿不到词。
     async fn fetch(&self, candidate: &Candidate) -> Result<Lyrics>;
-
-    /// 该源的展示名
-    fn name(&self) -> &'static str {
-        self.id().display_name()
-    }
 }
 
 /// 四个平台的实例容器。

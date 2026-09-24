@@ -5,12 +5,12 @@
 
 use std::path::Path;
 
+use lofty::config::ParseOptions;
 use lofty::file::{FileType, TaggedFileExt};
-use lofty::probe::Probe;
 use lofty::tag::TagType;
 
 use crate::domain::track::AudioFormat;
-use crate::infra::error::{AppError, Result};
+use crate::infra::error::Result;
 
 #[derive(Clone, Debug)]
 pub struct FormatCapability {
@@ -21,39 +21,38 @@ pub struct FormatCapability {
     pub writable: bool,
 }
 
-impl FormatCapability {
-    /// 界面文案（**不含任何格式规范名**，§6.5.1）
-    pub fn unsupported_reason(&self) -> &'static str {
-        "这种格式不支持保存歌词"
-    }
-}
-
 /// 探测文件格式与其标签可写性。只读，不修改文件。
 pub fn capability(path: &Path) -> Result<FormatCapability> {
-    let tagged = Probe::open(path)
-        .map_err(|e| AppError::TagRead { path: path.to_path_buf(), reason: e.to_string() })?
-        .read()
-        .map_err(|e| AppError::TagRead { path: path.to_path_buf(), reason: e.to_string() })?;
+    let tagged = super::read_tagged(path)?;
 
     let file_type = tagged.file_type();
     let tag_type = file_type.primary_tag_type();
     let writable = is_tag_writable(file_type, tag_type);
 
     Ok(FormatCapability {
-        format: tweak_format(path, file_type),
+        format: format_of(path, file_type),
         file_type,
         tag_type,
         writable,
     })
 }
 
-/// 仅判断可写性，避免为一次预检读取全部标签内容。
+/// 仅判断可写性。写入计划要对每首歌做一次，所以要尽量轻。
+///
+/// 可写性只取决于容器类型，因此读取时跳过封面与音频属性——那是一次完整读取里
+/// 最重的两部分。标签本身照读：连标签都读不出来的文件，同样写不进去。
 pub fn is_writable(path: &Path) -> bool {
-    capability(path).map(|c| c.writable).unwrap_or(false)
+    let light = ParseOptions::new().read_properties(false).read_cover_art(false);
+    super::read_tagged_with(path, light)
+        .map(|tagged| {
+            let file_type = tagged.file_type();
+            is_tag_writable(file_type, file_type.primary_tag_type())
+        })
+        .unwrap_or(false)
 }
 
 /// lofty 把 .m4a 归类为 `Mp4`，这里按扩展名细分以匹配 UI 上的格式徽标。
-fn tweak_format(path: &Path, ft: FileType) -> AudioFormat {
+pub(crate) fn format_of(path: &Path, ft: FileType) -> AudioFormat {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -76,8 +75,7 @@ fn tweak_format(path: &Path, ft: FileType) -> AudioFormat {
 }
 
 fn is_tag_writable(file_type: FileType, tag_type: TagType) -> bool {
-    let support = file_type.tag_support(tag_type);
-    support.is_writable()
+    file_type.tag_support(tag_type).is_writable()
 }
 
 #[cfg(test)]
@@ -104,5 +102,14 @@ mod tests {
     fn missing_file_is_an_error_not_a_panic() {
         let p = PathBuf::from("D:/definitely/not/here.mp3");
         assert!(capability(&p).is_err());
+        assert!(!is_writable(&p));
+    }
+
+    /// 扫描时的格式徽标直接由这条映射给出：扩展名大小写、m4a/m4b 别名都不能影响结果
+    #[test]
+    fn uppercase_extension_still_maps_to_the_badge() {
+        assert_eq!(format_of(Path::new("a.M4A"), FileType::Mp4), AudioFormat::M4a);
+        assert_eq!(format_of(Path::new("a.m4b"), FileType::Mp4), AudioFormat::M4a);
+        assert_eq!(format_of(Path::new("a.mp3"), FileType::Mpeg), AudioFormat::Mp3);
     }
 }

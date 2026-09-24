@@ -20,7 +20,6 @@ use lyrictag_lib::domain::candidate::SearchQuery;
 use lyrictag_lib::domain::track::{LyricsPresence, Track, TrackState};
 use lyrictag_lib::infra::config::{SaveTarget, Settings};
 use lyrictag_lib::infra::http;
-use lyrictag_lib::pipeline::orchestrator::NullSink;
 use lyrictag_lib::pipeline::{downloader, matcher, scanner, writer, ProviderGate};
 use lyrictag_lib::provider::ProviderRegistry;
 use lyrictag_lib::tag;
@@ -128,15 +127,7 @@ fn print_track_meta(t: &Track) {
     println!("   可信度   {:.2}", t.meta_confidence);
     println!("   已有歌词 {:?}", t.existing_lyrics);
     // 归一化之后的检索词——繁体标题会在这里变成简体
-    println!(
-        "   检索词   {:?}",
-        SearchQuery {
-            title: t.meta.display_title(),
-            artist: t.meta.display_artist(),
-            duration_secs: t.duration_secs().map(|s| s as u32),
-        }
-        .keyword()
-    );
+    println!("   检索词   {:?}", SearchQuery::from_track(t).keyword());
     println!();
 }
 
@@ -181,7 +172,7 @@ fn cmd_match(args: &[String]) -> Result<(), String> {
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
 
-    let summary = runtime.block_on(async {
+    runtime.block_on(async {
         // ① 静默检查源可用性（与界面一致，§4.5.2）
         let (up, down) = lyrictag_lib::pipeline::orchestrator::check_sources(&registry, &gate).await;
         println!(
@@ -200,11 +191,7 @@ fn cmd_match(args: &[String]) -> Result<(), String> {
         let mut failed = 0;
 
         for t in tracks.iter().take(limit) {
-            let query = SearchQuery {
-                title: t.meta.display_title(),
-                artist: t.meta.display_artist(),
-                duration_secs: t.duration_secs().map(|s| s as u32),
-            };
+            let query = SearchQuery::from_track(t);
             println!("══ {} ══", t.path.file_name().unwrap_or_default().to_string_lossy());
             println!(
                 "   本地：{:?} / {:?} / {}",
@@ -232,10 +219,9 @@ fn cmd_match(args: &[String]) -> Result<(), String> {
                     c.title,
                     c.artist_joined(),
                     c.duration_ms.map(|d| d / 1000).unwrap_or(0),
-                    if c.year.is_some() {
-                        format!(" · {}", c.year.unwrap())
-                    } else {
-                        String::new()
+                    match c.year {
+                        Some(y) => format!(" · {y}"),
+                        None => String::new(),
                     }
                 );
             }
@@ -266,9 +252,7 @@ fn cmd_match(args: &[String]) -> Result<(), String> {
             println!();
         }
         println!("小计：已匹配 {matched} · 待确认 {confirm} · 未找到 {failed}");
-        (matched, confirm, failed)
     });
-    let _ = summary;
     Ok(())
 }
 
@@ -289,9 +273,10 @@ fn cmd_write(args: &[String]) -> Result<(), String> {
     settings.lyrics.overwrite_existing = true;
 
     let tracks = scan_dir(dir)?;
-    let registry = ProviderRegistry::new(http::build_client());
+    // 封面下载复用同一个客户端：每首歌新建一个会重复做 TLS 初始化
+    let client = http::build_client();
+    let registry = ProviderRegistry::new(client.clone());
     let gate = ProviderGate::default();
-    let _sink = NullSink;
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
 
@@ -301,11 +286,7 @@ fn cmd_write(args: &[String]) -> Result<(), String> {
         let mut bytes_total = 0i64;
 
         for t in tracks.iter().take(limit) {
-            let query = SearchQuery {
-                title: t.meta.display_title(),
-                artist: t.meta.display_artist(),
-                duration_secs: t.duration_secs().map(|s| s as u32),
-            };
+            let query = SearchQuery::from_track(t);
             println!("══ {} ══", t.path.file_name().unwrap_or_default().to_string_lossy());
 
             // ① 匹配
@@ -367,7 +348,7 @@ fn cmd_write(args: &[String]) -> Result<(), String> {
 
             let cover_bytes = if cover && !track.meta.has_cover {
                 match &track.matched.as_ref().unwrap().cover_url {
-                    Some(url) => match downloader::fetch_cover(&http::build_client(), url).await {
+                    Some(url) => match downloader::fetch_cover(&client, url).await {
                         Ok(c) => {
                             println!("   封面 {} 字节（{}）", c.bytes.len(), c.mime);
                             Some(c)

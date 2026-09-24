@@ -1,17 +1,15 @@
 /** DOM 与格式化的小工具。 */
 
-import type { LyricsPresence } from "./types.js";
+import type { CandidateDto, LyricsPresence } from "./types.js";
 
 type Root = Document | Element;
 
-const root = (r: Root): Root => r;
-
 export function $(sel: string, r: Root = document): HTMLElement | null {
-  return root(r).querySelector<HTMLElement>(sel);
+  return r.querySelector<HTMLElement>(sel);
 }
 
 export function $$(sel: string, r: Root = document): HTMLElement[] {
-  return Array.from(root(r).querySelectorAll<HTMLElement>(sel));
+  return Array.from(r.querySelectorAll<HTMLElement>(sel));
 }
 
 /** 取元素；不存在就直接抛——模板 id 写错时应该立刻暴露，而不是静默不工作。 */
@@ -141,6 +139,37 @@ export function renderLrc(text: string | undefined): string {
     .join("\n");
 }
 
-export function sleep(ms: number): Promise<void> {
-  return new Promise((r) => window.setTimeout(r, ms));
+/**
+ * 一张候选卡片（详情面板与手动搜索弹窗共用同一份模板）。
+ *
+ * `pickable` 为假时不给 `data-cand`：点了没反应，比点了弹出一个假的「选中」好。
+ */
+export function candidateCardHtml(
+  c: CandidateDto,
+  i: number,
+  opts: { on: boolean; pickable: boolean },
+): string {
+  const src = SRC_META[c.provider] ?? { name: c.provider, cls: "netease" };
+  const cls = scoreClass(c.score);
+  return `<div class="cand ${opts.on ? "on" : ""} ${opts.pickable ? "" : "ro"}" ${opts.pickable ? `data-cand="${i}"` : ""}>
+      <div class="cand-h">
+        <span class="rk ${opts.on ? "checked" : ""}">${i + 1}</span>
+        <span class="ti trunc">${esc(c.title)}</span>
+        <span class="sc ${cls}">${c.score.toFixed(2)}</span>
+      </div>
+      <div class="cand-b">
+        <span class="cb-left">
+          <span class="nowrap">${esc(c.artist) || "—"}</span>
+          <span class="sep">·</span>
+          <span class="trunc album" title="${esc(c.album || "专辑未填")}">${esc(c.album || "专辑未填")}</span>
+        </span>
+        <span class="cb-right">
+          <span class="num">${fmtDur(c.duration)}</span>
+          <span class="sep">·</span>
+          <span class="num" title="${c.year == null ? "这个来源没有提供发行年份" : ""}">${c.year ?? '<span style="opacity:.6">年份 —</span>'}</span>
+          <span class="src"><i class="sq ${src.cls}"></i>${esc(src.name)}</span>
+        </span>
+      </div>
+      <div class="bar"><i class="${cls}" style="width:${Math.round(c.score * 100)}%"></i><u></u></div>
+    </div>`;
 }

@@ -21,12 +21,6 @@ pub struct MatchResult {
     pub confidence: Confidence,
 }
 
-impl MatchResult {
-    pub fn score(&self) -> f32 {
-        self.confidence.value()
-    }
-}
-
 /// 匹配结果里可以落盘的部分（歌词本身走缓存，见 `pipeline::library`）
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -63,9 +57,6 @@ impl From<&MatchResult> for MatchSummary {
 }
 
 impl MatchSummary {
-    pub fn artist_joined(&self) -> String {
-        self.artists.join("/")
-    }
     pub fn candidate(&self) -> Candidate {
         Candidate {
             provider: self.provider,

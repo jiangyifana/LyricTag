@@ -30,10 +30,6 @@ impl NetEaseProvider {
         let limiter = Arc::new(crate::infra::ratelimit::per_source());
         Self { api: NetEaseApi::new(http, limiter) }
     }
-
-    pub fn api(&self) -> &NetEaseApi {
-        &self.api
-    }
 }
 
 #[async_trait]

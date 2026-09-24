@@ -36,10 +36,6 @@ impl KuGouProvider {
         Self { api: KuGouApi::new(http, limiter) }
     }
 
-    pub fn api(&self) -> &KuGouApi {
-        &self.api
-    }
-
     /// 从歌曲搜索结果里挑出最可能是同一首歌的那条。
     ///
     /// 判据用**时长**而不是标题：酷狗的标题存在乱码记录（实测遇到过），
@@ -75,8 +71,11 @@ impl LyricsProvider for KuGouProvider {
     }
 
     async fn search(&self, query: &SearchQuery, limit: usize) -> Result<Vec<Candidate>> {
+        // 两步都要用关键词；归一化（含繁简转换）只做一次
+        let keyword = query.keyword();
+
         // ① 歌曲搜索
-        let json = self.api.song_search(&query.keyword(), limit).await?;
+        let json = self.api.song_search(&keyword, limit).await?;
         let songs = model::parse_song_search(&json);
         if songs.is_empty() {
             return Ok(Vec::new());
@@ -90,7 +89,7 @@ impl LyricsProvider for KuGouProvider {
         let hash = best.file_hash.clone();
         match self
             .api
-            .lyric_search(&query.keyword(), query.duration_secs, &hash)
+            .lyric_search(&keyword, query.duration_secs, &hash)
             .await
         {
             Ok(json) => {

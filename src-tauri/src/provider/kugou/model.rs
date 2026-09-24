@@ -64,7 +64,7 @@ pub fn parse_song_search(json: &Value) -> Vec<KugouSong> {
                 album: util::str_at(s, &["AlbumName"])
                     .map(|a| clean_display_title(&a))
                     .filter(|a| !a.is_empty()),
-                year: util::str_at(s, &["PublishDate"]).and_then(|d| year_from_date(&d)),
+                year: util::str_at(s, &["PublishDate"]).and_then(|d| util::year_from_date(&d)),
                 track_no: None,
                 duration_ms: util::u64_at(s, &["Duration"]).map(to_ms).filter(|v| *v > 0),
                 cover_url,
@@ -131,11 +131,6 @@ pub fn parse_lyric(json: &Value, song_id: &str) -> Result<Lyrics> {
     // 酷狗实测有一条带翻译的候选（`transname` / `transuid` 字段暗示存在），
     // 但内容未验证，因此不做假设——有则取，没有就写原文。
     Ok(util::build_lyrics(ProviderId::KuGou, song_id, &text, ""))
-}
-
-fn year_from_date(s: &str) -> Option<u32> {
-    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
-    (digits.len() == 4).then(|| digits.parse().ok()).flatten()
 }
 
 #[cfg(test)]
